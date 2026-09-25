@@ -30,16 +30,21 @@ write_pgpass() {
 clone_from_peer() {
   : "${LAB_PEER:?LAB_PEER must name the node to clone from}"
   log "empty data directory: cloning $LAB_PEER with pg_basebackup (slot $LAB_NODE)"
-  install -d -o postgres -g postgres -m 0700 "$PGDATA"
   gosu postgres pg_basebackup \
     --dbname="host=$LAB_PEER port=5432 user=replicator application_name=$LAB_NODE" \
     --pgdata="$PGDATA" --wal-method=stream --slot="$LAB_NODE" \
     --write-recovery-conf --checkpoint=fast --progress --no-password
+  # A recovery target copied from the source (left by a point-in-time restore) would make
+  # this standby stop at that point and promote itself.
+  sed -i '/^recovery_target/d' "$PGDATA/postgresql.auto.conf"
   log "clone complete; starting as a standby of $LAB_PEER"
 }
 
 if [ "$(id -u)" = '0' ]; then
   write_pgpass
+  # Created here rather than by the official entrypoint, which leaves the group as root;
+  # pgBackRest then warns about an unknown group when it restores the directory.
+  install -d -o postgres -g postgres -m 0700 "$PGDATA"
   if [ ! -s "$PGDATA/PG_VERSION" ] && [ "$LAB_BOOTSTRAP" = 'replica' ]; then
     clone_from_peer
   fi

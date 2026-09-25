@@ -13,6 +13,8 @@ LAB_ROOT_HOST="$(cd "$LAB_ROOT" && { pwd -W 2>/dev/null || pwd; })"
 export LAB_ROOT LAB_ROOT_HOST
 # shellcheck source=scripts/lib.sh
 source "$LAB_ROOT/scripts/lib.sh"
+# shellcheck source=scripts/drills.sh
+source "$LAB_ROOT/scripts/drills.sh"
 
 usage() {
   cat <<'EOF'
@@ -44,6 +46,14 @@ Partitioning
                            create partitions N months ahead, detach those older than M months
 
   --measure records median timings; use it only on a quiet machine (docs/benchmarking.md).
+
+Reliability
+  pitr-drill [--measure]   full backup, DELETE without WHERE, restore to just before it with
+                           pgBackRest, verify counts and checksums (reports/pitr-drill.md)
+  replica up|status|down   streaming standby of the current primary (slot + pg_basebackup)
+  switchover [--measure]   planned switchover: promote the standby, pg_rewind the old primary
+                           and rejoin it, while a client keeps writing
+                           (reports/switchover-drill.md); run it twice to switch back
 
 Security
   rls-plans                the tenant's order page under two policy designs
@@ -177,6 +187,17 @@ cmd_rls_plans() {
   pglab "./lab rls-plans" rls-report "$@"
 }
 
+cmd_replica() {
+  local action=${1:-status}
+  [ $# -gt 0 ] && shift
+  case $action in
+    up) replica_up "$@" ;;
+    status) replica_status "$@" ;;
+    down) replica_down "$@" ;;
+    *) die "replica: expected up, status or down" ;;
+  esac
+}
+
 cmd_test() {
   require_env
   ensure_runner
@@ -266,6 +287,9 @@ main() {
     tune) cmd_tune "$@" ;;
     untune) cmd_untune "$@" ;;
     rls-plans) cmd_rls_plans "$@" ;;
+    pitr-drill) pitr_drill "$@" ;;
+    replica) cmd_replica "$@" ;;
+    switchover) switchover "$@" ;;
     test) cmd_test "$@" ;;
     check) cmd_check "$@" ;;
     status) cmd_status "$@" ;;

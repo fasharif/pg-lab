@@ -10,7 +10,7 @@ from pathlib import Path
 
 import psycopg
 
-from pglab import casebook, indexing, partitioning, rls, workload
+from pglab import casebook, drills, heartbeat, indexing, partitioning, rls, workload
 from pglab.db import connect
 from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.errors import CheckError, LabError
@@ -168,6 +168,40 @@ def cmd_rls_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_heartbeat(args: argparse.Namespace) -> int:
+    count = heartbeat.run_heartbeat(
+        args.run_id, args.hosts, Path(args.out), interval=args.interval, duration=args.duration
+    )
+    print(f"{count} heartbeat attempts written to {args.out}")
+    return 0
+
+
+def cmd_fingerprint(_: argparse.Namespace) -> int:
+    with connect(application_name="pglab-drill") as conn:
+        count, checksum = drills.order_items_fingerprint(conn)
+    print(count, checksum)
+    return 0
+
+
+def cmd_drill_report(args: argparse.Namespace) -> int:
+    folder = Path(args.dir)
+    facts = drills.load_facts(folder / "facts.env")
+    attempts = drills.load_attempts(folder / "heartbeat.jsonl")
+    analyse = drills.analyse_pitr if args.drill == "pitr" else drills.analyse_switchover
+    with connect(application_name="pglab-drill") as conn:
+        info = run_info(conn, measured=args.measure, runs=1)
+        result = analyse(conn, facts, attempts, measured=args.measure)
+    text = drills.render(result, info, command=args.label)
+    default = REPORTS_DIR / ("pitr-drill.md" if args.drill == "pitr" else "switchover-drill.md")
+    _write(Path(args.output) if args.output else default, text)
+    (folder / "report.md").write_text(text, encoding="utf-8", newline="\n")
+    for check in result.checks:
+        print(f"{'pass' if check.passed else 'FAIL'}  {check.description}  {check.detail}")
+    if not result.passed:
+        raise CheckError(f"the {args.drill} drill failed its checks; see {folder}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pglab", description=__doc__)
     parser.add_argument("--label", default=None, help="command shown in report headers")
@@ -216,6 +250,25 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("rls-report", help="tenant query plans under two RLS policy designs")
     p.add_argument("--output", default=str(REPORTS_DIR / "rls-plans.md"))
     p.set_defaults(func=cmd_rls_report)
+
+    p = sub.add_parser("heartbeat", help="client loop writing one row per interval")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--hosts", required=True, help="comma-separated node names, e.g. pg1,pg2")
+    p.add_argument("--out", required=True)
+    p.add_argument("--interval", type=float, default=0.1)
+    p.add_argument("--duration", type=float, default=600.0)
+    p.set_defaults(func=cmd_heartbeat)
+
+    sub.add_parser("fingerprint", help="order_items row count and content checksum").set_defaults(
+        func=cmd_fingerprint
+    )
+
+    p = sub.add_parser("drill-report", help="check a drill's outcome and write its report")
+    p.add_argument("drill", choices=("pitr", "switchover"))
+    p.add_argument("--dir", required=True, help="the drill folder with facts.env and heartbeat")
+    p.add_argument("--output", default=None)
+    p.add_argument("--measure", action="store_true", help="publish the measured durations")
+    p.set_defaults(func=cmd_drill_report)
 
     p = sub.add_parser("casebook-state", help="revert (baseline) or apply (tuned) every fix")
     p.add_argument("state", choices=("baseline", "tuned"))

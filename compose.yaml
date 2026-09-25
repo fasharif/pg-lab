@@ -51,7 +51,8 @@ services:
       <<: *pg-environment
       LAB_NODE: pg1
       LAB_PEER: pg2
-      LAB_BOOTSTRAP: primary
+      # How an empty data directory is filled: initdb (primary) or a clone of the peer.
+      LAB_BOOTSTRAP: ${LAB_PG1_BOOTSTRAP:-primary}
     ports:
       - "127.0.0.1:${LAB_PG1_PORT:-55432}:5432"
     volumes:
@@ -68,7 +69,7 @@ services:
       <<: *pg-environment
       LAB_NODE: pg2
       LAB_PEER: pg1
-      LAB_BOOTSTRAP: replica
+      LAB_BOOTSTRAP: ${LAB_PG2_BOOTSTRAP:-replica}
     ports:
       - "127.0.0.1:${LAB_PG2_PORT:-55433}:5432"
     volumes:
