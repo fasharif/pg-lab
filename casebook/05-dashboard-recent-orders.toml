@@ -1,0 +1,23 @@
+query = "dashboard-recent-orders"
+fix_kind = "B-tree index on `createdAt` (the covering index added in case 7)"
+fixed_by = 7
+
+problem = """
+`ORDER BY "createdAt" DESC LIMIT 8` with no index on `createdAt`: every order is read and a
+top-N heap sort keeps the newest eight. The dashboard runs this on every page view.
+"""
+
+tradeoff = """
+With the index from case 7, the plan reads the index backwards and stops after eight entries.
+Its `INCLUDE` columns do not matter here: the page needs every column of the order and
+fetches the heap rows anyway.
+"""
+
+[before]
+seq_scan_on = ["orders"]
+node_present = ["Sort"]
+
+[after]
+index_used = ["orders_createdAt_idx"]
+node_absent = ["Sort"]
+no_seq_scan_on = ["orders"]

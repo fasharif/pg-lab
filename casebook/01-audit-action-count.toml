@@ -1,0 +1,33 @@
+query = "audit-by-action-count"
+fix_kind = "B-tree index with `text_pattern_ops` for prefix `LIKE`"
+
+problem = """
+The audit screen filters by the start of the action name (Prisma `startsWith`, which becomes
+`action LIKE 'prefix%'`) and shows the total for pagination. Nothing indexes `action`, so the
+count reads the whole of `audit_logs`, JSON details included, to return one number. A plain
+B-tree on `action` would not help either: the database collation is `en_US.utf8`, and
+`LIKE 'prefix%'` can only use an index whose order is byte-wise.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY "audit_logs_action_pattern_idx" ON audit_logs (action text_pattern_ops)''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "audit_logs_action_pattern_idx"''',
+]
+
+tradeoff = """
+The prefix becomes a range condition on the new index and the count is answered from the
+index alone. The cost is one more index on the table with the most inserts: every audit entry
+now updates four indexes instead of three (see `docs/indexing.md` for the measured size and
+WAL). `text_pattern_ops` serves `LIKE 'prefix%'` and equality but not `ORDER BY action` or
+range comparisons under the database collation; the audit screen needs neither. Prisma cannot
+declare operator classes on B-tree indexes, so this index lives in a raw SQL migration.
+"""
+
+[before]
+seq_scan_on = ["audit_logs"]
+
+[after]
+index_used = ["audit_logs_action_pattern_idx"]
+no_seq_scan_on = ["audit_logs"]

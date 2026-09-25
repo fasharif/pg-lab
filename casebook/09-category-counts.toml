@@ -1,0 +1,33 @@
+query = "catalogue-categories"
+fix_kind = "Partial B-tree index on visible products"
+
+problem = """
+The category tree counts, for each of the 40 categories, the products a retail shopper can
+see. Each count finds the category's products through `products_categoryId_idx` and then
+visits their heap pages to test `isActive` and `isTradeOnly`. Products of one category are
+spread over the whole table, so the 40 counts together read the table many times over.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY "products_categoryId_visible_idx" ON products ("categoryId") WHERE "isActive" AND NOT "isTradeOnly"''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "products_categoryId_visible_idx"''',
+]
+
+tradeoff = """
+The partial index holds only the products the storefront shows, so its predicate is the
+filter: each count becomes an index-only scan over that category's entries and never touches
+the heap. It is smaller than a full index, and changes to hidden or trade-only products do not
+touch it. The planner uses it only when the query's `WHERE` implies the index predicate, so
+the storefront query and the index must keep the same conditions; the casebook's plan check
+catches drift. The existing `products_categoryId_idx` stays for the back office, which also
+lists hidden products.
+"""
+
+[before]
+index_used = ["products_categoryId_idx"]
+
+[after]
+index_used = ["products_categoryId_visible_idx"]
+node_present = ["Index Only Scan"]

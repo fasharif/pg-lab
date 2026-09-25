@@ -1,0 +1,34 @@
+query = "audit-by-user"
+fix_kind = "Composite B-tree index `(userId, createdAt)`"
+
+problem = """
+The planner walks `audit_logs_createdAt_idx` backwards, newest entry first, and throws away
+every entry of other users until it has found 20 for this one. For a user with few entries
+that means visiting most of the index and fetching a heap row for each entry just to read its
+`userId`. The estimate assumes matching rows are spread evenly, which is why this plan looks
+cheap to the planner.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY "audit_logs_userId_createdAt_idx" ON audit_logs ("userId", "createdAt")''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "audit_logs_userId_createdAt_idx"''',
+]
+
+tradeoff = """
+With `userId` first and `createdAt` second, the user's entries are already in time order in
+the index: a backward scan returns the newest 20 and stops. A B-tree can be scanned in both
+directions, so `createdAt DESC` in the index definition is unnecessary. The index follows
+Prisma's naming (`@@index([userId, createdAt])` produces the same name), so it can move into
+`schema.prisma` unchanged. Write cost: one more index on `audit_logs`, measured in
+`docs/indexing.md`.
+"""
+
+[before]
+index_used = ["audit_logs_createdAt_idx"]
+
+[after]
+index_used = ["audit_logs_userId_createdAt_idx"]
+node_absent = ["Sort"]
+no_seq_scan_on = ["audit_logs"]
