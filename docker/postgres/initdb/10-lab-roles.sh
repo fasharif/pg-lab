@@ -4,7 +4,7 @@
 # database and the extensions the lab needs. Tables are created later by ./lab migrate.
 set -Eeuo pipefail
 
-for var in LAB_MIGRATOR_PASSWORD LAB_APP_PASSWORD LAB_ANALYST_PASSWORD \
+for var in LAB_MIGRATOR_PASSWORD LAB_APP_PASSWORD LAB_BACKOFFICE_PASSWORD LAB_ANALYST_PASSWORD \
   LAB_REPLICATOR_PASSWORD LAB_MONITOR_PASSWORD LAB_REWIND_PASSWORD; do
   if [ -z "${!var:-}" ]; then
     echo "10-lab-roles.sh: $var is not set (run ./lab init to create .env)" >&2
@@ -15,6 +15,7 @@ done
 psql -v ON_ERROR_STOP=1 --no-psqlrc --username "$POSTGRES_USER" --dbname postgres \
   -v migrator_pw="$LAB_MIGRATOR_PASSWORD" \
   -v app_pw="$LAB_APP_PASSWORD" \
+  -v backoffice_pw="$LAB_BACKOFFICE_PASSWORD" \
   -v analyst_pw="$LAB_ANALYST_PASSWORD" \
   -v replicator_pw="$LAB_REPLICATOR_PASSWORD" \
   -v monitor_pw="$LAB_MONITOR_PASSWORD" \
@@ -34,6 +35,11 @@ ALTER ROLE topflow_migrator SET role = 'topflow_owner';
 CREATE ROLE topflow_app LOGIN PASSWORD :'app_pw' CONNECTION LIMIT 60;
 ALTER ROLE topflow_app SET statement_timeout = '30s';
 ALTER ROLE topflow_app SET idle_in_transaction_session_timeout = '60s';
+
+-- Top Flow staff (back office): every tenant, still no DDL and no rewriting of history.
+CREATE ROLE topflow_backoffice LOGIN PASSWORD :'backoffice_pw' CONNECTION LIMIT 20;
+ALTER ROLE topflow_backoffice SET statement_timeout = '60s';
+ALTER ROLE topflow_backoffice SET idle_in_transaction_session_timeout = '60s';
 
 -- Read-only reporting: every tenant, but no personal contact data (column privileges).
 CREATE ROLE topflow_analyst LOGIN PASSWORD :'analyst_pw' CONNECTION LIMIT 5;
@@ -55,8 +61,12 @@ GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint, b
 
 CREATE DATABASE topflow OWNER topflow_owner;
 REVOKE ALL ON DATABASE topflow FROM PUBLIC;
-GRANT CONNECT, TEMPORARY ON DATABASE topflow TO topflow_migrator, topflow_app, topflow_analyst;
+GRANT CONNECT, TEMPORARY ON DATABASE topflow
+    TO topflow_migrator, topflow_app, topflow_backoffice, topflow_analyst;
 GRANT CONNECT ON DATABASE topflow TO monitor;
+-- Only pg_rewind needs the maintenance database; nobody needs template1.
+REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC;
+GRANT CONNECT ON DATABASE postgres TO rewind;
 
 \connect topflow
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
@@ -65,5 +75,5 @@ CREATE EXTENSION pg_trgm WITH SCHEMA public;
 CREATE EXTENSION pg_stat_statements WITH SCHEMA public;
 CREATE SCHEMA tap AUTHORIZATION postgres;
 CREATE EXTENSION pgtap WITH SCHEMA tap;
-GRANT USAGE ON SCHEMA tap TO topflow_migrator, topflow_app, topflow_analyst;
+GRANT USAGE ON SCHEMA tap TO topflow_migrator, topflow_app, topflow_backoffice, topflow_analyst;
 SQL
