@@ -20,6 +20,7 @@ ROLE_PASSWORD_VARIABLES: dict[str, str] = {
     "postgres": "PGPASSWORD",
     "topflow_migrator": "LAB_MIGRATOR_PASSWORD",
     "topflow_app": "LAB_APP_PASSWORD",
+    "topflow_backoffice": "LAB_BACKOFFICE_PASSWORD",
     "topflow_analyst": "LAB_ANALYST_PASSWORD",
     "monitor": "LAB_MONITOR_PASSWORD",
 }
@@ -55,6 +56,10 @@ def connect(
     if host is not None:
         options["host"] = host
         options["port"] = 5432
+        options["target_session_attrs"] = "any"
+    elif role == "topflow_analyst":
+        # Analyst sessions are read-only by default (default_transaction_read_only), which the
+        # runner's target_session_attrs=read-write would reject; any node will do for reads.
         options["target_session_attrs"] = "any"
     try:
         return psycopg.connect(autocommit=autocommit, **options)

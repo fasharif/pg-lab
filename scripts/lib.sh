@@ -63,8 +63,18 @@ ensure_runner() {
   is_running runner || compose up -d --wait runner >/dev/null
 }
 
-# Runs a command in the tools container (non-interactive).
-runner() { compose exec -T runner "$@"; }
+# Host name of the node that accepts writes, falling back to pg1 when none answers yet.
+# Cached for the life of one ./lab command.
+primary_host() {
+  if [ -z "${LAB_PRIMARY_HOST:-}" ]; then
+    LAB_PRIMARY_HOST=$(current_primary || echo pg1)
+  fi
+  printf '%s' "$LAB_PRIMARY_HOST"
+}
+
+# Runs a command in the tools container (non-interactive), pointed at the current primary.
+# Naming the host avoids libpq resolving a node that is not running (seconds per connection).
+runner() { compose exec -T -e PGHOST="$(primary_host)" -e PGPORT=5432 runner "$@"; }
 
 # One-line description of where the lab runs, printed at the top of generated reports.
 # LAB_ENVIRONMENT_NOTE (optional, from the shell) adds context such as "machine shared with
@@ -91,7 +101,8 @@ lab_environment() {
 pglab() {
   local label=${1% }
   shift
-  compose exec -T -e LAB_ENVIRONMENT="$(lab_environment)" runner python -m pglab --label "$label" "$@"
+  compose exec -T -e LAB_ENVIRONMENT="$(lab_environment)" -e PGHOST="$(primary_host)" -e PGPORT=5432 \
+    runner python -m pglab --label "$label" "$@"
 }
 
 # psql as the postgres superuser inside a node container (Unix socket, peer authentication).

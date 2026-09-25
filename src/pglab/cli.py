@@ -10,7 +10,7 @@ from pathlib import Path
 
 import psycopg
 
-from pglab import casebook, indexing, partitioning, workload
+from pglab import casebook, indexing, partitioning, rls, workload
 from pglab.db import connect
 from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.errors import CheckError, LabError
@@ -155,6 +155,19 @@ def cmd_partition_maintain(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rls_report(args: argparse.Namespace) -> int:
+    _, cases = _definitions()
+    # SET ROLE to the application role needs the superuser; no lab role may impersonate another.
+    with connect("postgres", application_name="pglab-rls") as conn:
+        info = run_info(conn, measured=False, runs=0)
+        casebook.apply_all(conn, cases)
+        statement, variants = rls.compare(conn)
+    _write(Path(args.output), rls.render_report(statement, variants, info, command=args.label))
+    for variant in variants:
+        print(f"{variant.plan.shared_buffers():>8,} buffers  {variant.label}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pglab", description=__doc__)
     parser.add_argument("--label", default=None, help="command shown in report headers")
@@ -199,6 +212,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--as-of", type=iso_date, default=None, help="reference date YYYY-MM-DD (default: anchor)"
     )
     p.set_defaults(func=cmd_partition_maintain)
+
+    p = sub.add_parser("rls-report", help="tenant query plans under two RLS policy designs")
+    p.add_argument("--output", default=str(REPORTS_DIR / "rls-plans.md"))
+    p.set_defaults(func=cmd_rls_report)
 
     p = sub.add_parser("casebook-state", help="revert (baseline) or apply (tuned) every fix")
     p.add_argument("state", choices=("baseline", "tuned"))

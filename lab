@@ -45,18 +45,23 @@ Partitioning
 
   --measure records median timings; use it only on a quiet machine (docs/benchmarking.md).
 
+Security
+  rls-plans                the tenant's order page under two policy designs
+                           (reports/rls-plans.md); leaves the schema tuned
+
+Tests
+  test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
+                           partition functions) and the integration tests; needs seeded data
+  check                    static checks: ruff, mypy, unit tests, definitions, shellcheck
+
 Help
   help                     this text
 EOF
 }
 
-cmd_init() {
-  if [ -f "$LAB_ROOT/.env" ]; then
-    info ".env already exists; leaving it unchanged"
-    return 0
-  fi
+# Prints the lines of .env.example, with a random value for every "change-me" placeholder.
+env_lines() {
   local line key value
-  umask 077
   while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}
     value=${line#*=}
@@ -66,8 +71,25 @@ cmd_init() {
     else
       printf '%s\n' "$line"
     fi
-  done <"$LAB_ROOT/.env.example" >"$LAB_ROOT/.env"
-  log "created .env with random passwords"
+  done <"$LAB_ROOT/.env.example"
+}
+
+cmd_init() {
+  umask 077
+  if [ ! -f "$LAB_ROOT/.env" ]; then
+    env_lines >"$LAB_ROOT/.env"
+    log "created .env with random passwords"
+    return 0
+  fi
+  # Keep existing values; add settings that are new in .env.example.
+  local line added=0
+  while IFS= read -r line; do
+    grep -q "^${line%%=*}=" "$LAB_ROOT/.env" && continue
+    printf '%s\n' "$line" >>"$LAB_ROOT/.env"
+    info "added ${line%%=*} to .env"
+    added=1
+  done < <(env_lines)
+  [ "$added" = 1 ] || info ".env is up to date"
 }
 
 cmd_up() {
@@ -125,6 +147,7 @@ cmd_partition() {
   require_env
   ensure_runner
   log "building the partitioned tables"
+  # shellcheck disable=SC2016 # expanded by the shell inside the runner container
   runner bash -c 'PGUSER=topflow_migrator PGPASSWORD="$LAB_MIGRATOR_PASSWORD" PGOPTIONS="-c client_min_messages=warning" psql -X -q -v ON_ERROR_STOP=1 -f sql/partitioning/10_partitioned_tables.sql'
   pglab "./lab partition $*" partition "$@"
 }
@@ -145,6 +168,34 @@ cmd_untune() {
   require_env
   ensure_runner
   pglab "./lab untune" casebook-state baseline
+}
+
+cmd_rls_plans() {
+  require_env
+  ensure_runner
+  log "comparing plans under row-level security"
+  pglab "./lab rls-plans" rls-report "$@"
+}
+
+cmd_test() {
+  require_env
+  ensure_runner
+  log "pgTAP suites"
+  runner bash -c 'pg_prove --failures tests/pgtap/*.sql'
+  log "integration tests"
+  runner python -m pytest -q -m integration tests/integration
+}
+
+cmd_check() {
+  require_env
+  ensure_runner
+  log "ruff, mypy, unit tests and definitions"
+  runner bash -c 'ruff format --check src tests && ruff check src tests && mypy \
+    && python -m pytest -q -m "not integration" && python -m pglab validate'
+  log "shellcheck"
+  docker run --rm -v "$LAB_ROOT_HOST:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 \
+    --external-sources lab scripts/*.sh docker/postgres/*.sh docker/postgres/initdb/*.sh
+  info "static checks passed"
 }
 
 cmd_status() {
@@ -179,8 +230,9 @@ cmd_psql() {
     postgres) password_var=PGPASSWORD ;;
     topflow_migrator) password_var=LAB_MIGRATOR_PASSWORD ;;
     topflow_app) password_var=LAB_APP_PASSWORD ;;
+    topflow_backoffice) password_var=LAB_BACKOFFICE_PASSWORD ;;
     topflow_analyst) password_var=LAB_ANALYST_PASSWORD ;;
-    *) die "psql: --user must be postgres, topflow_migrator, topflow_app or topflow_analyst" ;;
+    *) die "psql: --user must be postgres, topflow_migrator, topflow_app, topflow_backoffice or topflow_analyst" ;;
   esac
   compose exec runner bash -c "PGPASSWORD=\"\$$password_var\" exec psql -h $node -p 5432 -U $user"
 }
@@ -191,7 +243,8 @@ cmd_down() {
     compose_all down --volumes --remove-orphans
   else
     # compose needs the variables to parse the file; placeholders are enough to tear down.
-    LAB_POSTGRES_PASSWORD=x LAB_MIGRATOR_PASSWORD=x LAB_APP_PASSWORD=x LAB_ANALYST_PASSWORD=x \
+    LAB_POSTGRES_PASSWORD=x LAB_MIGRATOR_PASSWORD=x LAB_APP_PASSWORD=x LAB_BACKOFFICE_PASSWORD=x \
+      LAB_ANALYST_PASSWORD=x \
       LAB_REPLICATOR_PASSWORD=x LAB_MONITOR_PASSWORD=x LAB_REWIND_PASSWORD=x LAB_GRAFANA_PASSWORD=x \
       compose_all down --volumes --remove-orphans
   fi
@@ -212,6 +265,9 @@ main() {
     partition-maintain) cmd_partition_maintain "$@" ;;
     tune) cmd_tune "$@" ;;
     untune) cmd_untune "$@" ;;
+    rls-plans) cmd_rls_plans "$@" ;;
+    test) cmd_test "$@" ;;
+    check) cmd_check "$@" ;;
     status) cmd_status "$@" ;;
     psql) cmd_psql "$@" ;;
     down) cmd_down "$@" ;;
