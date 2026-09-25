@@ -8,7 +8,7 @@ statements (cases 5 and 6).
 """
 
 fix = [
-    '''CREATE INDEX CONCURRENTLY "orders_createdAt_idx" ON orders ("createdAt") INCLUDE (status, "totalAmount")''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_createdAt_idx" ON orders ("createdAt") INCLUDE (status, "totalAmount")''',
 ]
 revert = [
     '''DROP INDEX CONCURRENTLY IF EXISTS "orders_createdAt_idx"''',

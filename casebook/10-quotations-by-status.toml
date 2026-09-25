@@ -9,7 +9,7 @@ sorts them all to return 20.
 """
 
 fix = [
-    '''CREATE INDEX CONCURRENTLY "quotations_status_updatedAt_idx" ON quotations (status, "updatedAt")''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "quotations_status_updatedAt_idx" ON quotations (status, "updatedAt")''',
     '''DROP INDEX CONCURRENTLY IF EXISTS "quotations_status_idx"''',
 ]
 revert = [

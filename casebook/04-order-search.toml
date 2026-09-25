@@ -10,11 +10,11 @@ index lookup. Adding indexes alone does not change that: as long as the OR mixes
 """
 
 fix = [
-    '''CREATE INDEX CONCURRENTLY "orders_orderNumber_trgm_idx" ON orders USING gin ("orderNumber" gin_trgm_ops)''',
-    '''CREATE INDEX CONCURRENTLY "orders_purchaseOrderNumber_trgm_idx" ON orders USING gin ("purchaseOrderNumber" gin_trgm_ops)''',
-    '''CREATE INDEX CONCURRENTLY "orders_projectReference_trgm_idx" ON orders USING gin ("projectReference" gin_trgm_ops)''',
-    '''CREATE INDEX CONCURRENTLY "users_fullName_trgm_idx" ON users USING gin ("fullName" gin_trgm_ops)''',
-    '''CREATE INDEX CONCURRENTLY "organizations_name_trgm_idx" ON organizations USING gin (name gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_orderNumber_trgm_idx" ON orders USING gin ("orderNumber" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_purchaseOrderNumber_trgm_idx" ON orders USING gin ("purchaseOrderNumber" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_projectReference_trgm_idx" ON orders USING gin ("projectReference" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "users_fullName_trgm_idx" ON users USING gin ("fullName" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "organizations_name_trgm_idx" ON organizations USING gin (name gin_trgm_ops)''',
 ]
 revert = [
     '''DROP INDEX CONCURRENTLY IF EXISTS "orders_orderNumber_trgm_idx"''',

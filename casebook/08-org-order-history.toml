@@ -9,7 +9,7 @@ the customer's history, so the best customers get the slowest order page.
 """
 
 fix = [
-    '''CREATE INDEX CONCURRENTLY "orders_organizationId_createdAt_idx" ON orders ("organizationId", "createdAt")''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_organizationId_createdAt_idx" ON orders ("organizationId", "createdAt")''',
 ]
 revert = [
     '''DROP INDEX CONCURRENTLY IF EXISTS "orders_organizationId_createdAt_idx"''',

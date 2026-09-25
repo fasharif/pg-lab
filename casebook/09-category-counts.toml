@@ -9,7 +9,7 @@ spread over the whole table, so the 40 counts together read the table many times
 """
 
 fix = [
-    '''CREATE INDEX CONCURRENTLY "products_categoryId_visible_idx" ON products ("categoryId") WHERE "isActive" AND NOT "isTradeOnly"''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "products_categoryId_visible_idx" ON products ("categoryId") WHERE "isActive" AND NOT "isTradeOnly"''',
 ]
 revert = [
     '''DROP INDEX CONCURRENTLY IF EXISTS "products_categoryId_visible_idx"''',
