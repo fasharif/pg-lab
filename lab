@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# pg-lab: one entry point for the whole lab. Needs Docker (with Compose v2) and bash;
+# everything else runs in containers. Run ./lab help for the command list.
+set -Eeuo pipefail
+
+# Git Bash on Windows rewrites arguments that look like POSIX paths; container paths must
+# reach Docker unchanged.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Docker Desktop on Windows needs a Windows-style path; "pwd -W" exists only in Git Bash.
+LAB_ROOT_HOST="$(cd "$LAB_ROOT" && { pwd -W 2>/dev/null || pwd; })"
+export LAB_ROOT LAB_ROOT_HOST
+# shellcheck source=scripts/lib.sh
+source "$LAB_ROOT/scripts/lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: ./lab <command> [options]
+
+Setup
+  init                     create .env with random passwords (never committed)
+  up                       build images, start the primary and the tools container, migrate
+  migrate                  apply TopFlow's migrations, the lab schema and the security layer
+  seed [--scale N]         generate data; N = approximate order lines (default LAB_SCALE)
+  status                   containers, node roles and row counts
+  psql [--node N] [--user U]   interactive psql (default: current primary, postgres)
+  down                     stop everything and delete all lab volumes
+
+Performance
+  workload [--measure] [--runs N] [--state baseline|tuned|current]
+                           rank every API statement by buffers touched (reports/workload.md)
+  casebook [--measure] [--runs N]
+                           before/after plans of the ten slowest, with plan checks
+                           (reports/casebook.md); leaves the schema tuned
+  tune | untune            apply or revert every casebook fix
+  indexing                 index sizes and WAL per inserted row, before and after the
+                           casebook (reports/indexing.md); leaves the schema tuned
+
+  --measure records median timings; use it only on a quiet machine (docs/benchmarking.md).
+
+Help
+  help                     this text
+EOF
+}
+
+cmd_init() {
+  if [ -f "$LAB_ROOT/.env" ]; then
+    info ".env already exists; leaving it unchanged"
+    return 0
+  fi
+  local line key value
+  umask 077
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}
+    value=${line#*=}
+    if [ "$value" = "change-me" ]; then
+      value=$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')
+      printf '%s=%s\n' "$key" "$value"
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$LAB_ROOT/.env.example" >"$LAB_ROOT/.env"
+  log "created .env with random passwords"
+}
+
+cmd_up() {
+  [ -f "$LAB_ROOT/.env" ] || cmd_init
+  log "building images and starting pg1 and the runner"
+  compose up -d --build --wait pg1 runner
+  cmd_migrate
+}
+
+cmd_migrate() {
+  require_env
+  ensure_runner
+  log "migrating the schema"
+  runner bash scripts/migrate.sh
+}
+
+cmd_seed() {
+  require_env
+  local scale
+  scale=$(env_value LAB_SCALE 100000)
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --scale) scale=${2:?--scale needs a number}; shift 2 ;;
+      *) die "seed: unknown option $1" ;;
+    esac
+  done
+  [[ $scale =~ ^[0-9]+$ ]] || die "seed: --scale must be a whole number (got '$scale')"
+  ensure_runner
+  log "generating data at SCALE=$scale (about $scale order lines)"
+  runner psql -X -v ON_ERROR_STOP=1 -v scale="$scale" -f sql/generate/generate.sql
+}
+
+cmd_workload() {
+  require_env
+  ensure_runner
+  log "ranking the workload"
+  pglab "./lab workload $*" workload "$@"
+}
+
+cmd_casebook() {
+  require_env
+  ensure_runner
+  log "running the casebook"
+  pglab "./lab casebook $*" casebook "$@"
+}
+
+cmd_indexing() {
+  require_env
+  ensure_runner
+  log "measuring index sizes and write cost"
+  pglab "./lab indexing" index-report "$@"
+}
+
+cmd_tune() {
+  require_env
+  ensure_runner
+  pglab "./lab tune" casebook-state tuned
+}
+
+cmd_untune() {
+  require_env
+  ensure_runner
+  pglab "./lab untune" casebook-state baseline
+}
+
+cmd_status() {
+  require_env
+  compose_all ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'
+  local node
+  for node in "${LAB_NODES[@]}"; do
+    if is_running "$node"; then
+      if [ "$(node_query "$node" 'SELECT pg_is_in_recovery()')" = t ]; then
+        info "$node: standby"
+      else
+        info "$node: primary"
+      fi
+    fi
+  done
+}
+
+cmd_psql() {
+  require_env
+  local node="" user=postgres
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --node) node=${2:?}; shift 2 ;;
+      --user) user=${2:?}; shift 2 ;;
+      *) die "psql: unknown option $1" ;;
+    esac
+  done
+  [ -n "$node" ] || node=$(current_primary) || die "no primary is running (./lab up)"
+  ensure_runner
+  local password_var
+  case $user in
+    postgres) password_var=PGPASSWORD ;;
+    topflow_migrator) password_var=LAB_MIGRATOR_PASSWORD ;;
+    topflow_app) password_var=LAB_APP_PASSWORD ;;
+    topflow_analyst) password_var=LAB_ANALYST_PASSWORD ;;
+    *) die "psql: --user must be postgres, topflow_migrator, topflow_app or topflow_analyst" ;;
+  esac
+  compose exec runner bash -c "PGPASSWORD=\"\$$password_var\" exec psql -h $node -p 5432 -U $user"
+}
+
+cmd_down() {
+  log "stopping the lab and deleting its volumes"
+  if [ -f "$LAB_ROOT/.env" ]; then
+    compose_all down --volumes --remove-orphans
+  else
+    # compose needs the variables to parse the file; placeholders are enough to tear down.
+    LAB_POSTGRES_PASSWORD=x LAB_MIGRATOR_PASSWORD=x LAB_APP_PASSWORD=x LAB_ANALYST_PASSWORD=x \
+      LAB_REPLICATOR_PASSWORD=x LAB_MONITOR_PASSWORD=x LAB_REWIND_PASSWORD=x LAB_GRAFANA_PASSWORD=x \
+      compose_all down --volumes --remove-orphans
+  fi
+}
+
+main() {
+  local cmd=${1:-help}
+  [ $# -gt 0 ] && shift
+  case $cmd in
+    init) cmd_init "$@" ;;
+    up) cmd_up "$@" ;;
+    migrate) cmd_migrate "$@" ;;
+    seed) cmd_seed "$@" ;;
+    workload) cmd_workload "$@" ;;
+    casebook) cmd_casebook "$@" ;;
+    indexing) cmd_indexing "$@" ;;
+    tune) cmd_tune "$@" ;;
+    untune) cmd_untune "$@" ;;
+    status) cmd_status "$@" ;;
+    psql) cmd_psql "$@" ;;
+    down) cmd_down "$@" ;;
+    help | -h | --help) usage ;;
+    *)
+      usage >&2
+      die "unknown command: $cmd"
+      ;;
+  esac
+}
+
+main "$@"
