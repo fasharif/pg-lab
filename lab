@@ -37,6 +37,12 @@ Performance
   indexing                 index sizes and WAL per inserted row, before and after the
                            casebook (reports/indexing.md); leaves the schema tuned
 
+Partitioning
+  partition [--measure]    build monthly partitions of orders and audit_logs in schema part,
+                           check pruning, measure retention (reports/partitioning.md)
+  partition-maintain [--ahead N] [--retain M] [--as-of YYYY-MM-DD]
+                           create partitions N months ahead, detach those older than M months
+
   --measure records median timings; use it only on a quiet machine (docs/benchmarking.md).
 
 Help
@@ -115,6 +121,20 @@ cmd_indexing() {
   pglab "./lab indexing" index-report "$@"
 }
 
+cmd_partition() {
+  require_env
+  ensure_runner
+  log "building the partitioned tables"
+  runner bash -c 'PGUSER=topflow_migrator PGPASSWORD="$LAB_MIGRATOR_PASSWORD" PGOPTIONS="-c client_min_messages=warning" psql -X -q -v ON_ERROR_STOP=1 -f sql/partitioning/10_partitioned_tables.sql'
+  pglab "./lab partition $*" partition "$@"
+}
+
+cmd_partition_maintain() {
+  require_env
+  ensure_runner
+  pglab "./lab partition-maintain $*" partition-maintain "$@"
+}
+
 cmd_tune() {
   require_env
   ensure_runner
@@ -188,6 +208,8 @@ main() {
     workload) cmd_workload "$@" ;;
     casebook) cmd_casebook "$@" ;;
     indexing) cmd_indexing "$@" ;;
+    partition) cmd_partition "$@" ;;
+    partition-maintain) cmd_partition_maintain "$@" ;;
     tune) cmd_tune "$@" ;;
     untune) cmd_untune "$@" ;;
     status) cmd_status "$@" ;;

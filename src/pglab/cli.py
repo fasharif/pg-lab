@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 
-from pglab import casebook, indexing, workload
+import psycopg
+
+from pglab import casebook, indexing, partitioning, workload
 from pglab.db import connect
 from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.errors import CheckError, LabError
@@ -28,6 +31,13 @@ def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
+
+
+def iso_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a date (YYYY-MM-DD): {value!r}") from exc
 
 
 def _runs(args: argparse.Namespace) -> int | None:
@@ -110,6 +120,41 @@ def cmd_index_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_partition(args: argparse.Namespace) -> int:
+    _, cases = _definitions()
+    with connect(application_name="pglab-partition") as conn:
+        info = run_info(conn, measured=args.measure, runs=args.runs)
+        counts = partitioning.build(conn)
+        results = partitioning.run_report(conn, cases, _runs(args))
+        retention = partitioning.measure_retention(conn)
+    text = partitioning.render_report(results, retention, counts, info, command=args.label)
+    _write(Path(args.output), text)
+    failed = [failure for r in results for failure in r.failures]
+    for r in results:
+        scanned = len(partitioning.partitions_scanned(r.partitioned.plan))
+        status = "pass" if not r.failures else "FAIL"
+        print(f"{r.query.id:<22} {scanned:>3} of {r.total_partitions} partitions  {status}")
+    print(
+        f"retention: DELETE wrote {retention.delete_wal_bytes:,} bytes of WAL, "
+        f"DETACH wrote {retention.detach_wal_bytes:,}"
+    )
+    if failed:
+        raise CheckError("; ".join(failed))
+    return 0
+
+
+def cmd_partition_maintain(args: argparse.Namespace) -> int:
+    with connect(application_name="pglab-partition") as conn:
+        result = partitioning.maintain(conn, ahead=args.ahead, retain=args.retain, as_of=args.as_of)
+    for name in result.created:
+        print(f"created  {name}")
+    for name in result.detached:
+        print(f"detached {name} (now in schema part_archive)")
+    for parent, months in result.months_ready.items():
+        print(f"{parent}: partitions ready for the next {months} months")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pglab", description=__doc__)
     parser.add_argument("--label", default=None, help="command shown in report headers")
@@ -142,6 +187,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=str(REPORTS_DIR / "indexing.md"))
     p.set_defaults(func=cmd_index_report)
 
+    p = sub.add_parser("partition", help="build monthly partitions, check pruning, report")
+    p.add_argument("--output", default=str(REPORTS_DIR / "partitioning.md"))
+    timing_options(p)
+    p.set_defaults(func=cmd_partition)
+
+    p = sub.add_parser("partition-maintain", help="create future partitions, detach old ones")
+    p.add_argument("--ahead", type=int, default=3, help="months to keep ready (default 3)")
+    p.add_argument("--retain", type=int, default=24, help="full months to keep (default 24)")
+    p.add_argument(
+        "--as-of", type=iso_date, default=None, help="reference date YYYY-MM-DD (default: anchor)"
+    )
+    p.set_defaults(func=cmd_partition_maintain)
+
     p = sub.add_parser("casebook-state", help="revert (baseline) or apply (tuned) every fix")
     p.add_argument("state", choices=("baseline", "tuned"))
     p.set_defaults(func=cmd_casebook_state)
@@ -162,4 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except LabError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except psycopg.Error as exc:
+        print(f"database error: {exc}", file=sys.stderr)
         return 2
