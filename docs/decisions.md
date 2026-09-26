@@ -44,9 +44,9 @@ raw SQL migrations, which the casebook notes case by case.
 
 ## 4. A data generator in SQL, with hash-based values
 
-**Context.** The target is 10 million order lines (50 million as an option), and CI loads about
-100,000 on every run, so loading must not dominate the pipeline. Rows must be reproducible so
-that plans can be compared between runs.
+**Context.** The target is 10 million order lines (50 million as an option, not yet run), and
+CI loads about 100,000 on every run, so loading must not dominate the pipeline. Rows must be
+reproducible so that plans can be compared between runs.
 
 **Decision.** `generate_series` and pure SQL functions of the row number: `hashint8extended` for
 pseudo-random numbers, `md5` for UUID-shaped ids. Order totals are computed from the same line

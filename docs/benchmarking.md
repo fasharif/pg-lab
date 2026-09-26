@@ -43,10 +43,11 @@ The published timings will come from one run on a quiet machine at the documente
 4. Set `LAB_ENVIRONMENT_NOTE` to a short description of the host (CPU model, disk) before step 3
    so that it appears in every report header.
 
-Every table except the catalogue grows linearly with SCALE (sizes in `lab.dataset_size`). At
-SCALE=1000000 the generator wrote 4,059,979 rows across the 18 TopFlow tables, so expect about
-40 million at the target. SCALE=50000000 is supported by the same scripts; plan for five times
-the disk space and time again.
+Every table except the catalogue grows linearly with SCALE (sizes in `lab.dataset_size`). The
+row count of the committed data set is in `reports/dataset.md` (written by `./lab seed`); expect
+about ten times as many rows at the target. The generator accepts SCALE up to 100000000;
+SCALE=50000000 has not been run, and would need five times the disk space and time of the
+target again.
 
 ## Why buffers rank the workload
 

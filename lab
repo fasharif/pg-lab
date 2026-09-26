@@ -36,7 +36,8 @@ Performance
   workload [--measure] [--runs N] [--state baseline|tuned|current]
                            rank every API statement by buffers touched (reports/workload.md)
   casebook [--measure] [--runs N]
-                           before/after plans of the ten slowest, with plan checks
+                           before/after plans of the ten heaviest statements (by shared
+                           buffers), with plan checks
                            (reports/casebook.md); leaves the schema tuned
   tune | untune            apply or revert every casebook fix
   indexing                 index sizes and WAL per inserted row, before and after the
@@ -68,8 +69,9 @@ Monitoring
                            pgbench with TopFlow back-office traffic (default 120 s, 4 clients)
 
 Security
-  rls-plans                the tenant's order page under two policy designs
-                           (reports/rls-plans.md); leaves the schema tuned
+  rls-plans                the tenant's order page and total under three policy designs
+                           and one index variant (reports/rls-plans.md); leaves the
+                           schema tuned
 
 SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
   sqlserver up|seed [--scale N]|casebook|down

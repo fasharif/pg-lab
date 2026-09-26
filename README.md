@@ -53,13 +53,16 @@ Each answer is a script that anyone can rerun, and each report says how it was p
 
 - **Real schema.** TopFlow Hub's four Prisma migrations, copied unchanged and hash-checked.
 - **Data generator.** Pure SQL with a SCALE parameter (order lines): about 100,000 in CI,
-  10 million as the documented target, 50 million supported. Deterministic, skewed like real
-  customers, order totals consistent with their lines ([docs/data.md](docs/data.md)).
+  10 million as the documented target; the generator accepts up to 100 million, and 50 million
+  is an option not yet run. Deterministic, skewed like real customers, order totals consistent
+  with their lines; `./lab seed` describes what it generated in
+  [reports/dataset.md](reports/dataset.md) ([docs/data.md](docs/data.md)).
 - **Workload.** 29 read statements taken from the TopFlow API's services, each linked to its
   source, ranked by the buffers they touch ([reports/workload.md](reports/workload.md)).
-- **Performance casebook.** The ten heaviest statements, each with its plan before and after, the
-  fix (composite, covering, partial and trigram indexes, a query rewrite, a redundant index
-  dropped) and machine-checked plan expectations ([reports/casebook.md](reports/casebook.md)).
+- **Performance casebook.** The ten heaviest statements by shared buffers, each with its plan
+  before and after, the fix (composite, covering, partial and trigram indexes, a query rewrite, a
+  redundant index dropped), machine-checked plan expectations and, for the rewrite, a check that
+  it returns the same rows ([reports/casebook.md](reports/casebook.md)).
 - **Indexing strategy.** What to index and what not, with measured index sizes and WAL per
   inserted row before and after ([docs/indexing.md](docs/indexing.md),
   [reports/indexing.md](reports/indexing.md)).
@@ -67,15 +70,22 @@ Each answer is a script that anyone can rerun, and each report says how it was p
   plan (including run-time pruning of a generic plan), retention by `DETACH PARTITION
   CONCURRENTLY`, and a maintenance command ([docs/partitioning.md](docs/partitioning.md)).
 - **Point-in-time recovery drill.** pgBackRest with WAL archiving; a scripted `DELETE` without
-  `WHERE`, a restore to just before it, verified by row counts, a content checksum and every
-  acknowledged client write ([docs/pitr.md](docs/pitr.md)).
-- **Replication and switchover drill.** A streaming standby, a planned switchover with pg_rewind,
-  and a client that keeps writing and must lose nothing ([docs/replication.md](docs/replication.md)).
-- **Security.** Five database roles with least privilege, SCRAM-only authentication, and
-  row-level security for tenant isolation, proven by 27 pgTAP checks on real tenants
-  ([docs/security.md](docs/security.md)).
-- **Monitoring.** postgres_exporter, Prometheus with eleven unit-tested alert rules and a
-  provisioned Grafana dashboard ([docs/monitoring.md](docs/monitoring.md)).
+  `WHERE`, a restore to a restore point just before it, verified by row counts, a content
+  checksum and every acknowledged client write, and a count of the writes an in-place restore
+  loses ([docs/pitr.md](docs/pitr.md)).
+- **Replication, switchover and failover drills.** A streaming standby; a planned switchover with
+  a client that keeps writing and must lose nothing; an unplanned failover without fencing, where
+  pg_rewind, connected as a non-superuser role, rewinds the diverged old primary
+  ([docs/replication.md](docs/replication.md)).
+- **Security.** Five application roles and three infrastructure roles with least privilege
+  (column-level `UPDATE` and state-checking policies for customer writes), SCRAM-only
+  authentication, and row-level security for tenant isolation, tested by 84 pgTAP checks on
+  every tenant table with generated tenants. The trust boundary is stated plainly: the policies
+  stop queries that forget their tenant filter, not code that can run arbitrary SQL as the API
+  role ([docs/security.md](docs/security.md)).
+- **Monitoring.** postgres_exporter, Prometheus with eleven alert rules, each covered by a
+  promtool scenario, and a provisioned Grafana dashboard
+  ([docs/monitoring.md](docs/monitoring.md)).
 - **SQL Server chapter.** The casebook on SQL Server 2022, written and syntax-checked but not run
   ([docs/sqlserver.md](docs/sqlserver.md)).
 
@@ -153,6 +163,7 @@ with a random value. `.env` is ignored by git.
 | `LAB_GRAFANA_PORT`, `LAB_PROMETHEUS_PORT` | 55430, 55490 | monitoring on 127.0.0.1 |
 | `LAB_*_PASSWORD` | random | one password per role; Grafana's admin password |
 | `LAB_MSSQL_*` | random, 55414, 3g | SQL Server chapter only |
+| `LAB_PROJECT` | pg-lab | Compose project name, and the prefix of every container, volume and image |
 | `LAB_ENVIRONMENT_NOTE` (shell) | none | extra text for the environment line of every report |
 
 `./lab psql --user topflow_analyst` opens psql as any of the lab roles.
@@ -161,10 +172,10 @@ with a random value. `.env` is ignored by git.
 
 | Command | What it runs |
 | --- | --- |
-| `./lab check` | ruff, mypy --strict, 62 unit tests (plans recorded from the lab, report rendering, drill analysis, monitoring check, SQL Server parser), workload and casebook validation, sqlfluff on the SQL, promtool on the alert rules and their 8 scenarios, shellcheck |
-| `./lab test` | 96 pgTAP tests (schema, roles and privileges, tenant isolation, SCRAM and pg_hba, partition functions) and 17 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS) |
-| `./lab casebook` | the ten plan checks, before and after |
-| `./lab ci` | the whole lab at LAB_SCALE: up, seed, casebook, partitions and maintenance, tests, RLS plans, PITR drill, replica, switchover and back, tests again, monitoring check |
+| `./lab check` | ruff, mypy --strict, 72 unit tests (plans recorded from the lab, report rendering, drill analysis, monitoring check, SQL Server parser), workload and casebook validation, sqlfluff syntax checks of `sql/lab`, `sql/security`, `sql/partitioning` and `sqlserver/sql` (not the generator, the pgTAP suites or the workload statements), promtool on the alert rules and their 10 scenarios, shellcheck |
+| `./lab test` | 165 pgTAP tests (schema; roles, table and column privileges; tenant isolation and customer writes; SCRAM and pg_hba; partition functions, which need `./lab partition` first) and 20 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS, the policy design, casebook indexes rebuilt when invalid or outdated) |
+| `./lab casebook` | the ten plan checks, before and after, and the rewrite's result check |
+| `./lab ci` | the whole lab at LAB_SCALE: up, seed, casebook, partitions and maintenance, tests, RLS plans, PITR drill, replica, switchover and back, failover drill, tests again, monitoring check |
 
 GitHub Actions runs the static checks and `./lab ci` on every push to `main` and every pull
 request (`.github/workflows/ci.yml`).
@@ -193,7 +204,7 @@ docs/                    one page per chapter, decisions, benchmarking policy
 
 ## Design decisions
 
-Fifteen short records in [docs/decisions.md](docs/decisions.md). The ones that shaped the lab most:
+Sixteen short records in [docs/decisions.md](docs/decisions.md). The ones that shaped the lab most:
 reports rank work by buffers and publish durations only from measured runs; CI checks plan shape,
 not speed; the casebook is data, not code; row-level security tests tenant rows with a function
 the planner cannot see into, because policies it can see into made it misjudge the tenant
@@ -208,11 +219,13 @@ Not done yet, stated plainly:
   machine (procedure in docs/benchmarking.md).
 - **SQL Server not run.** It needs you to accept Microsoft's licence; the expected plans in
   `sqlserver/expectations.toml` are unconfirmed until then.
-- **No unplanned failover drill.** The switchover is clean, so pg_rewind finds nothing to rewind.
-  A drill where the old primary keeps accepting writes after the promotion (and loses them) would
-  exercise pg_rewind for real and show why fencing matters.
-- **No automatic failover** (Patroni or similar) and no connection proxy; TopFlow's API client
-  (node-postgres) is not covered by the libpq multi-host approach (docs/replication.md).
+- **No automatic failover or fencing** (Patroni or similar) and no connection proxy; the failover
+  drill shows what a failover without fencing loses. TopFlow's API client (node-postgres) is not
+  covered by the libpq multi-host approach (docs/replication.md).
+- **Self-asserted tenant context.** Row-level security trusts the user and organisation the API
+  session sets; a verified token or a role per tenant would close that gap (docs/security.md).
+- **CI not yet run on GitHub.** The workflow was run locally from a fresh clone, on Docker
+  Desktop and in a Linux container with a GitHub-like runner user, but not on GitHub Actions.
 - **No TLS** between clients and servers; SCRAM protects passwords only.
 - **One pgBackRest repository on a local volume.** A second repository on object storage and
   scheduled differential backups would be the next step.

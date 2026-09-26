@@ -59,7 +59,8 @@ space inside heap and index pages needs `pgstattuple`, which is too expensive to
 | PostgresLowCacheHitRatio | hit ratio below 95% under sustained reads for 15 minutes | warning |
 | PostgresHighDeadTupleRatio | a table with more than 20% dead rows (and 10,000 or more) for 30 minutes | warning |
 
-`promtool test rules` runs eight scenarios with synthetic series (in `./lab check` and CI). One
+`promtool test rules` runs ten scenarios with synthetic series (in `./lab check` and CI), which
+between them cover all eleven rules. One
 of them caught a real mistake: `pg_replication_is_replica == 1 and pg_replication_lag_seconds > 30`
 returns the left-hand value, so the alert text said the standby was "1s behind"; the rule now
 puts the lag first. A unit test also checks that every metric used by the rules and the dashboard
