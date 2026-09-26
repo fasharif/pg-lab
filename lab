@@ -26,7 +26,8 @@ Setup
   init                     create .env with random passwords (never committed)
   up                       build images, start the primary and the tools container, migrate
   migrate                  apply TopFlow's migrations, the lab schema and the security layer
-  seed [--scale N]         generate data; N = approximate order lines (default LAB_SCALE)
+  seed [--scale N]         generate data; N = approximate order lines (default LAB_SCALE);
+                           describes it in reports/dataset.md
   status                   containers, node roles and row counts
   psql [--node N] [--user U]   interactive psql (default: current primary, postgres)
   down                     stop everything and delete all lab volumes
@@ -153,6 +154,8 @@ cmd_seed() {
   ensure_runner
   log "generating data at SCALE=$scale (about $scale order lines)"
   runner psql -X -v ON_ERROR_STOP=1 -v scale="$scale" -f sql/generate/generate.sql
+  log "describing the data set"
+  pglab "./lab seed --scale $scale" dataset-report
 }
 
 cmd_workload() {

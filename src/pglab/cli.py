@@ -13,6 +13,7 @@ import psycopg
 
 from pglab import (
     casebook,
+    dataset,
     drills,
     heartbeat,
     indexing,
@@ -129,6 +130,16 @@ def cmd_index_report(args: argparse.Namespace) -> int:
         print(
             f"{name:<12} WAL per row {before.bytes_per_row:,.0f} B -> {after.bytes_per_row:,.0f} B"
         )
+    return 0
+
+
+def cmd_dataset_report(args: argparse.Namespace) -> int:
+    with connect(application_name="pglab-dataset") as conn:
+        info = run_info(conn, measured=False, runs=0)
+        data = dataset.build(conn)
+    _write(Path(args.output), dataset.render(data, info, command=args.label))
+    for line in dataset.summary(data):
+        print(line)
     return 0
 
 
@@ -304,6 +315,10 @@ def _performance_commands(sub: Subparsers) -> None:
     p.add_argument("--output", default=str(REPORTS_DIR / "indexing.md"))
     p.set_defaults(func=cmd_index_report)
 
+    p = sub.add_parser("dataset-report", help="row counts, time order and skew of the data set")
+    p.add_argument("--output", default=str(REPORTS_DIR / "dataset.md"))
+    p.set_defaults(func=cmd_dataset_report)
+
     p = sub.add_parser("partition", help="build monthly partitions, check pruning, report")
     p.add_argument("--output", default=str(REPORTS_DIR / "partitioning.md"))
     _timing_options(p)
@@ -317,7 +332,7 @@ def _performance_commands(sub: Subparsers) -> None:
     )
     p.set_defaults(func=cmd_partition_maintain)
 
-    p = sub.add_parser("rls-report", help="tenant query plans under two RLS policy designs")
+    p = sub.add_parser("rls-report", help="tenant query plans under three RLS policy designs")
     p.add_argument("--output", default=str(REPORTS_DIR / "rls-plans.md"))
     p.set_defaults(func=cmd_rls_report)
 
