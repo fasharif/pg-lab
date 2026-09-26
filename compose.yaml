@@ -26,6 +26,10 @@ x-pg-node: &pg-node
   shm_size: 256m
   mem_limit: ${LAB_PG_MEM_LIMIT:-1g}
   stop_grace_period: 60s
+  # An init process as PID 1 reaps the processes that docker exec leaves behind (a health check
+  # that outlived its timeout, for example). With postgres as PID 1, PostgreSQL 18 took such an
+  # orphan's exit for a crashed child and restarted every session ("untracked child process").
+  init: true
   command:
     - postgres
     - -c
