@@ -38,7 +38,7 @@ The published timings will come from one run on a quiet machine at the documente
    so that it appears in every report header.
 
 Every table except the catalogue grows linearly with SCALE (sizes in `lab.dataset_size`). At
-SCALE=1000000 the generator wrote 4,059,935 rows across the 18 TopFlow tables, so expect about
+SCALE=1000000 the generator wrote 4,059,979 rows across the 18 TopFlow tables, so expect about
 40 million at the target. SCALE=50000000 is supported by the same scripts; plan for five times
 the disk space and time again.
 

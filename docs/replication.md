@@ -20,6 +20,14 @@ Replication is asynchronous. The standby also has pgBackRest's `restore_command`
 up from the archive if it falls behind the slot. `hot_standby_feedback` is on, which avoids query
 cancellations on the standby at the cost of some bloat on the primary.
 
+The feedback also showed up in a measurement. In one run of `./lab partition` with a standby
+attached, the partitions copied and vacuumed a moment earlier were not marked all-visible: the
+index-only scans made 1,370 and 1,918 heap fetches, and the 30-day revenue statement read 449
+buffers instead of 67. Without a standby the same statements made no heap fetches. The likely
+cause is the standby's reported `xmin`, held in its replication slot, which keeps rows that
+recent from counting as visible to everyone until the next feedback message. The lab's reports
+are therefore generated before a standby is attached, as `./lab ci` orders them.
+
 ## The switchover drill
 
 `./lab switchover` swaps the roles of the two nodes while a client keeps writing; running it
