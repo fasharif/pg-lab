@@ -8,7 +8,7 @@ from pglab.casebook import CREATE_INDEX, statement_tag
 from pglab.definitions import WorkloadQuery
 from pglab.execute import Timing, is_timing_line
 from pglab.indexing import human_bytes
-from pglab.report import PENDING, RunInfo, code, ms, table
+from pglab.report import PENDING, RunInfo, code, ms, table, timing_cell
 from pglab.workload import WorkloadResult, rank, render_report
 from tests.conftest import load_plan
 
@@ -55,6 +55,18 @@ def test_timing_lines_are_recognised() -> None:
 
 def test_timing_median() -> None:
     assert Timing((5.0, 1.0, 3.0)).median_ms == 3.0
+    # With planning times, the median is taken over planning plus execution per run.
+    timing = Timing((5.0, 1.0, 3.0), (0.5, 4.0, 0.1))
+    assert timing.median_ms == 5.0
+    assert timing.median_execution_ms == 3.0
+    assert timing.median_planning_ms == 0.5
+    assert Timing((1.0,)).median_planning_ms is None
+
+
+def test_timing_cells_show_the_planning_share() -> None:
+    assert timing_cell(None, None) == PENDING
+    assert timing_cell(12.34, 0.41) == "12.3 ms (planning 0.410 ms)"
+    assert timing_cell(250.0, None) == "250 ms"
 
 
 def _result(query_id: str, plan_name: str) -> WorkloadResult:

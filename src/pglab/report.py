@@ -36,6 +36,13 @@ def code(text: str, language: str = "") -> str:
     return f"{fence}{language}\n{text.rstrip()}\n{fence}"
 
 
+def timing_cell(total: float | None, planning: float | None) -> str:
+    """'12.3 ms (planning 0.4 ms)', or the pending marker."""
+    if total is None:
+        return PENDING
+    return ms(total) if planning is None else f"{ms(total)} (planning {ms(planning)})"
+
+
 def ms(value: float | None) -> str:
     """Milliseconds for tables, or the pending marker when the run was not a measured one."""
     if value is None:
@@ -61,8 +68,9 @@ class RunInfo:
 
     def header_lines(self, command: str) -> list[str]:
         timing = (
-            f"median of {self.runs} runs after one warm-up run; server-side execution time "
-            "from EXPLAIN (ANALYZE, TIMING OFF)"
+            f"median of {self.runs} runs after one warm-up run; server-side planning plus "
+            "execution time, including converting the rows to text, from EXPLAIN (ANALYZE, "
+            "SERIALIZE TEXT, TIMING OFF, SUMMARY ON); sending them to the client is not included"
             if self.measured
             else f"{PENDING}. This was a functional run: every count, size, plan and check "
             "below is measured, but durations were not recorded (see docs/benchmarking.md)"

@@ -22,7 +22,7 @@ from pglab.definitions import Case
 from pglab.errors import LabError
 from pglab.execute import Timing, explain_json, explain_raw, explain_text, measure, render
 from pglab.explain import Plan, format_blocks
-from pglab.report import RunInfo, code, ms, table
+from pglab.report import RunInfo, code, table, timing_cell
 
 PARENTS = ("part.orders", "part.audit_logs")
 PARTITION_NAME = re.compile(r"_p\d{4}_\d{2}$")
@@ -378,9 +378,13 @@ def render_report(
         timings.append(
             (
                 r.query.title,
-                ms(r.baseline.timing.median_ms if r.baseline.timing else None),
-                ms(r.plain.timing.median_ms if r.plain.timing else None),
-                ms(r.partitioned.timing.median_ms if r.partitioned.timing else None),
+                *(
+                    timing_cell(
+                        side.timing.median_ms if side.timing else None,
+                        side.timing.median_planning_ms if side.timing else None,
+                    )
+                    for side in (r.baseline, r.plain, r.partitioned)
+                ),
             )
         )
     lines = [
@@ -409,7 +413,10 @@ def render_report(
             "lrrrrc",
         ),
         "",
-        "## Time-bounded statements: median execution time",
+        "## Time-bounded statements: median time per call",
+        "",
+        "Planning plus execution, with the planning share in brackets: pruning and the number",
+        "of partitions add planning work, and a generic plan prunes when it starts executing.",
         "",
         table(
             ["Statement", "Plain, TopFlow indexes", "Plain, tuned", "Partitioned"], timings, "lrrr"

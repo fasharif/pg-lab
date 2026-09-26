@@ -8,7 +8,13 @@ server version and the environment at the top.
 | Kind of run | What it records | How |
 | --- | --- | --- |
 | Functional (default) | Plans, actual row counts, shared buffers, logical checks, index sizes, WAL volumes, row counts and checksums | `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, SUMMARY OFF)`; the `I/O Timings` lines that `track_io_timing` adds are removed |
-| Measured (`--measure`) | Everything above plus durations | Median of N runs (default 15) after one warm-up run, server-side execution time from `EXPLAIN (ANALYZE, TIMING OFF, SUMMARY ON)`; drill durations measured by the drill scripts |
+| Measured (`--measure`) | Everything above plus durations | Median of N runs (default 15) after one warm-up run of planning plus execution time, from `EXPLAIN (ANALYZE, SERIALIZE TEXT, TIMING OFF, SUMMARY ON)`; drill durations measured by the drill scripts |
+
+What a measured time includes: planning (the partitioning report shows it separately, because
+pruning and the number of partitions add planning work and a generic plan prunes when it starts
+executing), execution, and, through `SERIALIZE TEXT`, converting the result rows to text as the
+server would for a client. It does not include sending the rows over the network or the
+client's own work, and `TIMING OFF` keeps per-node timing overhead out of the total.
 
 The committed reports are functional runs made on a laptop that was building other projects at
 the same time. Their timing columns say **pending a measured run**. Buffer counts, index sizes

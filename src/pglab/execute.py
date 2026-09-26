@@ -2,8 +2,10 @@
 
 Functional runs (the default) use EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, SUMMARY OFF): the
 plan with actual row counts and buffer counts but no durations, so nothing time-dependent
-reaches a report. Measured runs time the statement with EXPLAIN (ANALYZE, TIMING OFF,
-SUMMARY ON) and keep the server-side execution time of each run.
+reaches a report. Measured runs time the statement with EXPLAIN (ANALYZE, SERIALIZE TEXT,
+TIMING OFF, SUMMARY ON) and keep, for each run, the planning time and the execution time; with
+SERIALIZE TEXT the execution time includes converting the result rows to text, as for a client.
+Sending them over the network is not included.
 """
 
 from __future__ import annotations
@@ -85,23 +87,41 @@ def explain_raw(conn: Connection, statement: str, options: str) -> list[tuple[An
 
 @dataclass(frozen=True)
 class Timing:
+    """Server-side times (ms) of the measured runs: execution and, per run, planning."""
+
     runs: tuple[float, ...]
+    planning: tuple[float, ...] = ()
 
     @property
     def median_ms(self) -> float:
+        """Median of planning plus execution: what the statement costs the server per call."""
+        if not self.planning:
+            return statistics.median(self.runs)
+        return statistics.median(e + p for e, p in zip(self.runs, self.planning, strict=True))
+
+    @property
+    def median_execution_ms(self) -> float:
         return statistics.median(self.runs)
+
+    @property
+    def median_planning_ms(self) -> float | None:
+        return statistics.median(self.planning) if self.planning else None
+
+
+MEASURE_OPTIONS = "ANALYZE, SERIALIZE TEXT, TIMING OFF, SUMMARY ON, FORMAT JSON"
 
 
 def measure(conn: Connection, statement: str, runs: int, warmup: int = 1) -> Timing:
-    """Median-ready server-side execution times (ms) of `runs` executions after `warmup`."""
+    """Server-side planning and execution times (ms) of `runs` executions after `warmup`."""
     if runs < 1:
         raise LabError("measured runs need --runs of at least 1")
-    samples: list[float] = []
+    executions: list[float] = []
+    plannings: list[float] = []
     for index in range(warmup + runs):
-        rows = explain_raw(conn, statement, "ANALYZE, TIMING OFF, SUMMARY ON, FORMAT JSON")
-        plan = parse_plan(rows[0][0])
-        if plan.execution_ms is None:
-            raise LabError("EXPLAIN did not report an execution time")
+        plan = parse_plan(explain_raw(conn, statement, MEASURE_OPTIONS)[0][0])
+        if plan.execution_ms is None or plan.planning_ms is None:
+            raise LabError("EXPLAIN did not report planning and execution times")
         if index >= warmup:
-            samples.append(plan.execution_ms)
-    return Timing(tuple(samples))
+            executions.append(plan.execution_ms)
+            plannings.append(plan.planning_ms)
+    return Timing(tuple(executions), tuple(plannings))
