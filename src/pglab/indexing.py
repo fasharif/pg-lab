@@ -176,6 +176,12 @@ ALTERNATIVES = (
         'CREATE INDEX "lab_orders_org_created_plain" ON orders ("organizationId", "createdAt")',
         "orders_organizationId_createdAt_idx",
     ),
+    (
+        "audit_logs ids as uuid instead of 36-character text (a migration of every table)",
+        "lab_audit_id_uuid",
+        'CREATE INDEX "lab_audit_id_uuid" ON audit_logs ((id::uuid))',
+        "audit_logs_pkey",
+    ),
 )
 
 
