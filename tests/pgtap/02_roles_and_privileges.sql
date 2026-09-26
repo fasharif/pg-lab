@@ -1,7 +1,7 @@
 -- Least privilege: role attributes, table and column privileges, ownership, DDL rights.
 BEGIN;
 SET LOCAL search_path = public, tap;
-SELECT plan(31);
+SELECT plan(43);
 
 -- Role attributes
 SELECT isnt_superuser(r, format('%s is not a superuser', r))
@@ -56,8 +56,16 @@ SELECT is(
 );
 
 -- Table privileges
-SELECT table_privs_are('public', 'orders', 'topflow_app', ARRAY['SELECT', 'INSERT', 'UPDATE'],
-    'the API reads, creates and updates orders but never deletes them');
+SELECT table_privs_are('public', 'orders', 'topflow_app', ARRAY['SELECT', 'INSERT'],
+    'the API reads and creates orders, never deletes them, and updates named columns only');
+SELECT table_privs_are('public', 'quotations', 'topflow_app', ARRAY['SELECT'],
+    'the API updates named columns of quotations only');
+SELECT table_privs_are('public', 'organization_members', 'topflow_app', ARRAY['SELECT', 'DELETE'],
+    'the API cannot add members: joining an organisation is a staff flow');
+SELECT table_privs_are('public', 'organizations', 'topflow_app', ARRAY['SELECT'],
+    'the API cannot register organisations: a staff flow');
+SELECT table_privs_are('public', 'document_sequences', 'topflow_app', ARRAY[]::text[],
+    'the API has no privilege on the shared document counters');
 SELECT table_privs_are('public', 'audit_logs', 'topflow_app', ARRAY['SELECT', 'INSERT'],
     'audit entries are append-only for the API');
 SELECT table_privs_are('public', 'audit_logs', 'topflow_backoffice', ARRAY['SELECT', 'INSERT'],
@@ -82,10 +90,26 @@ SELECT column_privs_are('public', 'orders', 'shippingAddress', 'topflow_analyst'
     'the analyst cannot read delivery addresses');
 SELECT column_privs_are('public', 'users', 'role', 'topflow_app', ARRAY['SELECT', 'INSERT'],
     'customers cannot change their own role');
-SELECT column_privs_are('public', 'organizations', 'creditLimit', 'topflow_app', ARRAY['SELECT', 'INSERT'],
+SELECT column_privs_are('public', 'organizations', 'creditLimit', 'topflow_app', ARRAY['SELECT'],
     'customers cannot change their credit limit');
 SELECT column_privs_are('public', 'organizations', 'name', 'topflow_app',
-    ARRAY['SELECT', 'INSERT', 'UPDATE'], 'customers can rename their organisation');
+    ARRAY['SELECT', 'UPDATE'], 'customers can rename their organisation');
+SELECT column_privs_are('public', 'orders', 'status', 'topflow_app',
+    ARRAY['SELECT', 'INSERT', 'UPDATE'], 'customers can change an order''s status (to cancel it)');
+SELECT column_privs_are('public', 'orders', 'paymentStatus', 'topflow_app',
+    ARRAY['SELECT', 'INSERT'], 'customers cannot change an order''s payment status');
+SELECT column_privs_are('public', 'orders', 'totalAmount', 'topflow_app',
+    ARRAY['SELECT', 'INSERT'], 'customers cannot change an order''s amount');
+SELECT column_privs_are('public', 'quotations', 'total', 'topflow_app', ARRAY['SELECT'],
+    'customers cannot change a quotation''s prices');
+SELECT column_privs_are('public', 'quotations', 'validUntil', 'topflow_app', ARRAY['SELECT'],
+    'customers cannot change a quotation''s validity');
+SELECT column_privs_are('public', 'organization_members', 'role', 'topflow_app',
+    ARRAY['SELECT', 'UPDATE'], 'member roles change through UPDATE only (owners, by policy)');
+SELECT function_privs_are('app', 'next_document_number', ARRAY['text'], 'topflow_app',
+    ARRAY['EXECUTE'], 'the API takes document numbers through app.next_document_number()');
+SELECT is_definer('app', 'next_document_number', ARRAY['text'],
+    'app.next_document_number() runs as the owner');
 
 -- DDL
 SELECT is(has_schema_privilege('topflow_app', 'public', 'CREATE'), false,
