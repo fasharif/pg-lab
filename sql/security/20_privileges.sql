@@ -6,7 +6,8 @@
 --   topflow_app         customer-facing API: tenant-scoped by row-level security, and
 --                       limited to the columns and states its flows change
 --   topflow_backoffice  staff API: every tenant, no DDL, cannot rewrite history
---   topflow_analyst     read-only reporting, every tenant, no personal contact data
+--   topflow_analyst     read-only reporting, every tenant, no personal data (contact
+--                       details, addresses, IP addresses)
 --
 -- Table privileges follow what TopFlow's API does (apps/api/src at 61310d2): customers
 -- respond to quotations but never create quotation lines, place orders but never delete
@@ -99,7 +100,8 @@ GRANT SELECT, INSERT ON lab.heartbeat TO topflow_app;
 GRANT SELECT ON lab.settings TO topflow_app, topflow_backoffice, topflow_analyst;
 
 -- ─── Analyst ────────────────────────────────────────────────────────────────
--- SELECT on every column except personal contact data. Column privileges are granted
+-- SELECT on every column except personal data: contact details, addresses and the IP
+-- addresses in the audit trail. Column privileges are granted
 -- per table from the catalogue, so a new column is hidden until it is reviewed here.
 DO $$
 DECLARE
@@ -125,7 +127,9 @@ BEGIN
               ('quote_requests', 'contactName'), ('quote_requests', 'contactEmail'),
               ('quote_requests', 'contactPhone'),
               ('organization_invitations', 'email'), ('organization_invitations', 'tokenHash'),
-              ('orders', 'shippingAddress'), ('orders', 'deliveryAddress')
+              ('orders', 'shippingAddress'), ('orders', 'deliveryAddress'),
+              -- An IP address next to a user id is personal data (UAE PDPL, GDPR).
+              ('audit_logs', 'ipAddress')
           );
         EXECUTE format('GRANT SELECT (%s) ON public.%I TO topflow_analyst', columns, target.relname);
     END LOOP;

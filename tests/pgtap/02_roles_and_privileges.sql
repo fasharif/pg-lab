@@ -1,7 +1,7 @@
 -- Least privilege: role attributes, table and column privileges, ownership, DDL rights.
 BEGIN;
 SET LOCAL search_path = public, tap;
-SELECT plan(45);
+SELECT plan(47);
 
 -- Role attributes
 SELECT isnt_superuser(r, format('%s is not a superuser', r))
@@ -90,6 +90,10 @@ SELECT column_privs_are('public', 'users', 'role', 'topflow_analyst', ARRAY['SEL
     'the analyst can read user roles');
 SELECT column_privs_are('public', 'orders', 'shippingAddress', 'topflow_analyst', ARRAY[]::text[],
     'the analyst cannot read delivery addresses');
+SELECT column_privs_are('public', 'audit_logs', 'ipAddress', 'topflow_analyst', ARRAY[]::text[],
+    'the analyst cannot read the IP addresses in the audit trail');
+SELECT column_privs_are('public', 'audit_logs', 'action', 'topflow_analyst', ARRAY['SELECT'],
+    'the analyst can read what happened in the audit trail');
 SELECT column_privs_are('public', 'users', 'role', 'topflow_app', ARRAY['SELECT', 'INSERT'],
     'customers cannot change their own role');
 SELECT column_privs_are('public', 'organizations', 'creditLimit', 'topflow_app', ARRAY['SELECT'],
