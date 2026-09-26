@@ -33,7 +33,7 @@ clone_from_peer() {
   gosu postgres pg_basebackup \
     --dbname="host=$LAB_PEER port=5432 user=replicator application_name=$LAB_NODE" \
     --pgdata="$PGDATA" --wal-method=stream --slot="$LAB_NODE" \
-    --write-recovery-conf --checkpoint=fast --progress --no-password
+    --write-recovery-conf --checkpoint=fast --progress --no-password --status-interval=1
   # A recovery target copied from the source (left by a point-in-time restore) would make
   # this standby stop at that point and promote itself.
   sed -i '/^recovery_target/d' "$PGDATA/postgresql.auto.conf"
