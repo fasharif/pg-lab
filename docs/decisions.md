@@ -100,8 +100,9 @@ index-only scan over one month it is not justified.
 
 ## 8. pgBackRest rather than WAL-G
 
-**Context.** The PITR drill needs WAL archiving, full backups and a restore to a timestamp, with
-the repository on a local volume.
+**Context.** The PITR drill needs WAL archiving, full backups and a restore to a point in time,
+with the repository on a local volume. The drill restores to the time recorded just before the
+accident, as an operator would, and optionally to a named restore point (docs/pitr.md).
 
 **Decision.** pgBackRest 2.59 from PGDG, repository on a Docker volume shared by both nodes.
 

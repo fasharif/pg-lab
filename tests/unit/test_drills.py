@@ -23,6 +23,7 @@ from pglab.drills import (
     node_sequence,
     parse_lsn,
     render,
+    report_name,
     split_at_target,
 )
 from pglab.errors import LabError
@@ -223,6 +224,7 @@ PITR_ATTEMPTS = [
 ]
 PITR_FACTS = {
     "RUN_ID": "pitr-1",
+    "TARGET_TYPE": "name",
     "TARGET_NAME": "pitr-1",
     "TARGET_LSN": "0/5000",
     "TARGET_TIME": "2026-09-26 10:00:00+00",
@@ -286,6 +288,54 @@ def test_pitr_fails_when_a_write_before_the_target_is_missing_or_one_after_is_re
     )
     assert not wrong_content.passed
     assert all(value is None for _, value in wrong_content.timings)
+
+
+# The same run with the default target: the time recorded just before the accident, with the
+# WAL insert position read right after it (0/5000).
+PITR_TIME_FACTS = {
+    **{k: v for k, v in PITR_FACTS.items() if k != "TARGET_NAME"},
+    "TARGET_TYPE": "time",
+    "TARGET_TIME": "2026-09-26 10:00:00.123456+00",
+}
+
+
+def test_pitr_to_a_recorded_time_uses_the_same_checks_and_names_the_time() -> None:
+    kept = {1: 100.0, 2: 100.1, 4: 100.3}
+    result = analyse_pitr(PITR_TIME_FACTS, PITR_ATTEMPTS, Recovered(10, "42", kept), measured=False)
+    assert result.passed, [c for c in result.checks if not c.passed]
+    table = dict(result.facts_table)
+    assert table["Recovery target"].startswith("time `2026-09-26 10:00:00.123456+00`")
+    assert "--type=time --target=<recorded time>" in table["Restore"]
+    assert "every write committed before the recorded time is present" in [
+        c.description for c in result.checks
+    ]
+    assert any("recovery_target_inclusive" in note for note in result.notes)
+    replayed = analyse_pitr(
+        PITR_TIME_FACTS, PITR_ATTEMPTS, Recovered(10, "42", {**kept, 7: 100.6}), measured=False
+    )
+    assert [c.description for c in replayed.checks if not c.passed] == [
+        "no write that started after the recorded time was replayed"
+    ]
+
+
+def test_each_drill_variant_has_its_own_report() -> None:
+    assert report_name("pitr", PITR_TIME_FACTS) == "pitr-drill.md"
+    assert report_name("pitr", PITR_FACTS) == "pitr-drill-name.md"
+    there = {"OLD_PRIMARY": "pg1", "NEW_PRIMARY": "pg2"}
+    back = {"OLD_PRIMARY": "pg2", "NEW_PRIMARY": "pg1"}
+    assert report_name("switchover", there) == "switchover-drill-pg1-to-pg2.md"
+    assert report_name("switchover", back) == "switchover-drill-pg2-to-pg1.md"
+    assert report_name("failover", there) == "failover-drill.md"
+
+
+def test_pitr_rejects_an_unknown_target_type() -> None:
+    with pytest.raises(LabError, match="unknown recovery target type 'xid'"):
+        analyse_pitr(
+            {**PITR_FACTS, "TARGET_TYPE": "xid"},
+            PITR_ATTEMPTS,
+            Recovered(10, "42", {}),
+            measured=False,
+        )
 
 
 FAILOVER_FACTS = {

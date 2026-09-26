@@ -52,12 +52,16 @@ Partitioning
   --measure records median timings; use it only on a quiet machine (docs/benchmarking.md).
 
 Reliability
-  pitr-drill [--measure]   full backup, DELETE without WHERE, restore to just before it with
-                           pgBackRest, verify counts and checksums (reports/pitr-drill.md)
+  pitr-drill [--target time|name] [--measure]
+                           full backup, DELETE without WHERE, restore to just before it with
+                           pgBackRest: to the time recorded before the accident (default) or to
+                           a restore point; verify counts, checksums and client writes
+                           (reports/pitr-drill.md, reports/pitr-drill-name.md)
   replica up|status|down   streaming standby of the current primary (slot + pg_basebackup)
   switchover [--measure]   planned switchover: promote the standby, pg_rewind the old primary
                            and rejoin it, while a client keeps writing
-                           (reports/switchover-drill.md); run it twice to switch back
+                           (reports/switchover-drill-<old>-to-<new>.md); run it twice to
+                           switch back
   failover-drill           unplanned failover: promote the standby while the primary still
                            writes, then pg_rewind (as the non-superuser role rewind) and
                            rejoin the diverged old primary (reports/failover-drill.md)
@@ -79,9 +83,9 @@ SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
 
 CI
   ci                       the whole lab at SCALE=LAB_SCALE, as GitHub Actions runs it: up, seed,
-                           casebook, partitions, tests, PITR drill, replica, switchover there
-                           and back, failover drill, tests again, monitoring (reports go to
-                           out/reports)
+                           casebook, partitions, tests, PITR drills (recorded time, restore
+                           point), replica, switchover there and back, failover drill, tests
+                           again, monitoring (reports go to out/reports)
 
 Tests
   test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
@@ -292,7 +296,8 @@ cmd_ci() {
   cmd_partition_maintain --ahead 4 --retain 12
   cmd_test
   cmd_rls_plans
-  pitr_drill
+  pitr_drill --target time
+  pitr_drill --target name
   replica_up
   switchover
   unset LAB_PRIMARY_HOST

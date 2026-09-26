@@ -244,7 +244,7 @@ def cmd_drill_report(args: argparse.Namespace) -> int:
         else:
             result = drills.analyse_failover(facts, _failover_state(conn, facts))
     text = drills.render(result, info, command=args.label)
-    default = REPORTS_DIR / f"{args.drill}-drill.md"
+    default = REPORTS_DIR / drills.report_name(args.drill, facts)
     _write(Path(args.output) if args.output else default, text)
     (folder / "report.md").write_text(text, encoding="utf-8", newline="\n")
     for check in result.checks:

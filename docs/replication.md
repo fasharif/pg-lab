@@ -2,8 +2,12 @@
 
 Files: `docker/postgres/lab-entrypoint.sh` (clone on first start), `scripts/drills.sh`
 (`replica_up`, `switchover`, `failover_drill`), `src/pglab/heartbeat.py` (client loop),
-`src/pglab/drills.py` (analysis). Reports: `reports/switchover-drill.md`,
-`reports/failover-drill.md`.
+`src/pglab/drills.py` (analysis). Reports: `reports/switchover-drill-pg1-to-pg2.md` and
+`reports/switchover-drill-pg2-to-pg1.md` (one per direction), `reports/failover-drill.md`.
+
+The committed `reports/switchover-drill-pg2-to-pg1.md` is the second switchover of the
+regeneration run at SCALE=1000000 (2026-09-26), when every switchover wrote the same file and the
+first direction's report was overwritten; the next run writes both.
 
 ## The standby
 

@@ -70,9 +70,9 @@ Each answer is a script that anyone can rerun, and each report says how it was p
   plan (including run-time pruning of a generic plan), retention by `DETACH PARTITION
   CONCURRENTLY`, and a maintenance command ([docs/partitioning.md](docs/partitioning.md)).
 - **Point-in-time recovery drill.** pgBackRest with WAL archiving; a scripted `DELETE` without
-  `WHERE`, a restore to a restore point just before it, verified by row counts, a content
-  checksum and every acknowledged client write, and a count of the writes an in-place restore
-  loses ([docs/pitr.md](docs/pitr.md)).
+  `WHERE`, then a restore to the time recorded just before it (or to a named restore point),
+  verified by row counts, a content checksum and every acknowledged client write, and a count of
+  the writes an in-place restore loses ([docs/pitr.md](docs/pitr.md)).
 - **Replication, switchover and failover drills.** A streaming standby; a planned switchover with
   a client that keeps writing and must lose nothing; an unplanned failover without fencing, where
   pg_rewind, connected as a non-superuser role, rewinds the diverged old primary
@@ -175,7 +175,7 @@ with a random value. `.env` is ignored by git.
 | `./lab check` | ruff, mypy --strict, 72 unit tests (plans recorded from the lab, report rendering, drill analysis, monitoring check, SQL Server parser), workload and casebook validation, sqlfluff syntax checks of `sql/lab`, `sql/security`, `sql/partitioning` and `sqlserver/sql` (not the generator, the pgTAP suites or the workload statements), promtool on the alert rules and their 10 scenarios, shellcheck |
 | `./lab test` | 184 pgTAP tests (schema; roles, table and column privileges; tenant isolation and customer writes; SCRAM and pg_hba; partition functions, which need `./lab partition` first) and 20 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS, the policy design, casebook indexes rebuilt when invalid or outdated) |
 | `./lab casebook` | the ten plan checks, before and after, and the rewrite's result check |
-| `./lab ci` | the whole lab at LAB_SCALE: up, seed, casebook, partitions and maintenance, tests, RLS plans, PITR drill, replica, switchover and back, failover drill, tests again, monitoring check |
+| `./lab ci` | the whole lab at LAB_SCALE: up, seed, casebook, partitions and maintenance, tests, RLS plans, PITR drills (to a recorded time and to a restore point), replica, switchover and back, failover drill, tests again, monitoring check |
 
 GitHub Actions runs the static checks and `./lab ci` on every push to `main` and every pull
 request (`.github/workflows/ci.yml`).

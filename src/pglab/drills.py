@@ -160,12 +160,14 @@ class Recovered:
 class TargetSplit:
     """The acknowledged heartbeat writes, classified against the recovery target.
 
-    before: visible to the statement that created the restore point, so committed (and their
-    commit records written) before it; recovery must keep every one.
-    after: the WAL insert position read inside their transaction is already past the restore
-    point, so their commit record comes after it; recovery must drop every one.
-    in_flight: neither (at most the one write running while the point was created); either
-    outcome is correct, so they are counted but not checked.
+    before: visible to the statement that recorded the target (the restore point, or the time
+    just before the accident), so committed, with their commit records written and their
+    commit times taken, before it; recovery must keep every one.
+    after: the WAL insert position read inside their transaction is already past the position
+    recorded at the target, so their commit record comes later in the WAL and their commit time
+    is later than the recorded time; recovery must drop every one.
+    in_flight: neither (at most the one or two writes running while the target was recorded);
+    either outcome is correct, so they are counted but not checked.
     """
 
     before: list[Attempt]
@@ -189,9 +191,44 @@ def split_at_target(
     return TargetSplit(before, after, in_flight)
 
 
+@dataclass(frozen=True)
+class TargetWords:
+    """How a PITR report names its recovery target."""
+
+    noun: str  # "the recorded time", "the restore point"
+    description: str  # the "Recovery target" row of the report
+    restore: str  # the pgBackRest command, with the target as a placeholder
+
+
+def target_words(facts: dict[str, str]) -> TargetWords:
+    """TARGET_TYPE time: the time recorded just before the accident, as an operator would have
+    it; name: a restore point the drill created just before the accident."""
+    kind = facts.get("TARGET_TYPE", "name")
+    lsn = facts.get("TARGET_LSN", "?")
+    when = facts.get("TARGET_TIME", "?")
+    if kind == "time":
+        return TargetWords(
+            "the recorded time",
+            f"time `{when}`, recorded just before the DELETE (WAL insert position {lsn} "
+            "read right after it)",
+            "`pgbackrest restore --delta --type=time --target=<recorded time> "
+            "--target-action=promote`",
+        )
+    if kind == "name":
+        return TargetWords(
+            "the restore point",
+            f"restore point `{facts.get('TARGET_NAME', '?')}` at WAL {lsn}, created at {when} "
+            "just before the DELETE",
+            "`pgbackrest restore --delta --type=name --target=<restore point> "
+            "--target-action=promote`",
+        )
+    raise LabError(f"unknown recovery target type {kind!r} (expected time or name)")
+
+
 def analyse_pitr(
     facts: dict[str, str], attempts: Sequence[Attempt], recovered: Recovered, *, measured: bool
 ) -> DrillResult:
+    words = target_words(facts)
     target_epoch = float(fact(facts, "TARGET_EPOCH"))
     target_lsn_text = fact(facts, "TARGET_LSN")
     count_before, checksum_before = int(fact(facts, "COUNT_BEFORE")), fact(facts, "CHECKSUM_BEFORE")
@@ -224,12 +261,12 @@ def analyse_pitr(
             f"sum of row hashes {recovered.checksum} (expected {checksum_before})",
         ),
         Check(
-            "every write committed before the restore point is present",
+            f"every write committed before {words.noun} is present",
             not missing and bool(split.before),
             f"{len(split.before):,} committed before it, {len(missing)} missing",
         ),
         Check(
-            "no write that started after the restore point was replayed",
+            f"no write that started after {words.noun} was replayed",
             not replayed_after and bool(split.after),
             f"{len(split.after):,} started after it, {len(replayed_after)} replayed",
         ),
@@ -241,17 +278,9 @@ def analyse_pitr(
     ]
     result.facts_table = [
         ("Backup", f"full backup {facts.get('BACKUP_LABEL', '?')} (pgBackRest)"),
-        (
-            "Recovery target",
-            f"restore point `{facts.get('TARGET_NAME', '?')}` at WAL {target_lsn_text}, "
-            f"created at {facts.get('TARGET_TIME', '?')} just before the DELETE",
-        ),
+        ("Recovery target", words.description),
         ("Accident", "`DELETE FROM order_items` without a WHERE clause"),
-        (
-            "Restore",
-            "`pgbackrest restore --delta --type=name --target=<restore point> "
-            "--target-action=promote`",
-        ),
+        ("Restore", words.restore),
         (
             "Timeline",
             f"{facts.get('TIMELINE_BEFORE', '?')} before, "
@@ -259,8 +288,8 @@ def analyse_pitr(
         ),
         (
             "Acknowledged client writes",
-            f"{len(split.before):,} before the restore point, {len(split.in_flight)} in flight "
-            f"while it was created, {len(split.after):,} after it",
+            f"{len(split.before):,} before {words.noun}, {len(split.in_flight)} in flight "
+            f"while it was recorded, {len(split.after):,} after it",
         ),
         (
             "Data lost by restoring in place",
@@ -290,11 +319,21 @@ def analyse_pitr(
     result.notes = [
         "The heartbeat client wrote one row every "
         f"{facts.get('HEARTBEAT_INTERVAL', '?')} s throughout; its log is the evidence for the "
-        "acknowledged-writes checks. A write counts as committed before the restore point when "
-        "the statement that created the point could see it, and as started after it when the "
-        "WAL position read inside its own transaction is past the point, so neither check "
-        "depends on clocks.",
+        f"acknowledged-writes checks. A write counts as committed before {words.noun} when the "
+        "statement that recorded the target could see it, and as started after it when the "
+        "WAL position read inside its own transaction is past the position recorded at the "
+        "target, so neither check compares the client's clock with the server's.",
         "",
+    ]
+    if facts.get("TARGET_TYPE") == "time":
+        result.notes += [
+            "Recovery to a time replays every transaction that committed at or before the "
+            "target and stops at the first commit after it (`recovery_target_inclusive` is on "
+            "by default). The DELETE commits after the recorded time, so a correct recovery "
+            "stops before it: the row-count and checksum checks above test exactly that.",
+            "",
+        ]
+    result.notes += [
         "Restoring in place goes back in time for the whole database: the writes the "
         "application made after the accident are lost with it. Restoring a copy to a side "
         "instance and moving the deleted rows back instead keeps them (docs/pitr.md).",
@@ -452,6 +491,17 @@ def analyse_failover(facts: dict[str, str], state: FailoverState) -> DrillResult
         "the promotion. The planned switchover drill stops it first and loses nothing.",
     ]
     return result
+
+
+def report_name(drill: str, facts: dict[str, str]) -> str:
+    """File name of a drill's report: one per PITR target type and one per switchover
+    direction, so that ./lab ci keeps the evidence of every variant it runs."""
+    if drill == "pitr":
+        kind = facts.get("TARGET_TYPE", "name")
+        return "pitr-drill.md" if kind == "time" else f"pitr-drill-{kind}.md"
+    if drill == "switchover":
+        return f"switchover-drill-{fact(facts, 'OLD_PRIMARY')}-to-{fact(facts, 'NEW_PRIMARY')}.md"
+    return f"{drill}-drill.md"
 
 
 def render(result: DrillResult, info: RunInfo, *, command: str) -> str:

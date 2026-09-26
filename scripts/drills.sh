@@ -121,14 +121,19 @@ replica_down() {
 pitr_drill() {
   require_env
   ensure_runner
-  local measure=() primary standby label target deleted seg t0 t1
+  local measure=() target_type=time target_args=() primary standby label target deleted seg t0 t1
   local count checksum last_seq target_lsn target_time target_epoch
   while [ $# -gt 0 ]; do
     case $1 in
       --measure) measure=(--measure); shift ;;
+      --target) target_type=${2:?--target needs time or name}; shift 2 ;;
       *) die "pitr-drill: unknown option $1" ;;
     esac
   done
+  case $target_type in
+    time | name) ;;
+    *) die "pitr-drill: --target must be time or name (got '$target_type')" ;;
+  esac
   primary=$(current_primary) || die "no primary is running (./lab up)"
   standby=$(other_node "$primary")
   if is_running "$standby"; then
@@ -138,6 +143,7 @@ pitr_drill() {
   fi
   drill_start pitr
   record NODE "$primary"
+  record TARGET_TYPE "$target_type"
 
   log "1/7 full backup with pgBackRest"
   compose exec -T -u postgres "$primary" pgbackrest --stanza=topflow --type=full \
@@ -151,25 +157,49 @@ pitr_drill() {
   heartbeat_start "$primary"
   sleep 3
 
-  log "3/7 recording the state of order_items and creating the recovery target"
+  log "3/7 recording the state of order_items and the recovery target ($target_type)"
   read -r count checksum < <(runner python -m pglab fingerprint)
   record COUNT_BEFORE "$count"
   record CHECKSUM_BEFORE "$checksum"
   sleep 1
-  # A named restore point is an exact position in the WAL, unlike a timestamp (commit records
-  # carry their own times). The same statement reads the newest heartbeat it can see: every
-  # write up to that one committed before the restore point.
-  target=$(node_psql "$primary" -At -F '|' -c \
-    "SELECT (SELECT coalesce(max(seq), 0) FROM lab.heartbeat WHERE run_id = '$DRILL_ID'),
-            lsn, clock_timestamp(), extract(epoch FROM clock_timestamp())
-     FROM pg_create_restore_point('$DRILL_ID') AS lsn")
-  IFS='|' read -r last_seq target_lsn target_time target_epoch <<<"$target"
-  record TARGET_NAME "$DRILL_ID"
+  case $target_type in
+    time)
+      # What an operator has after an accident: the time just before it. The same statement
+      # reads the newest heartbeat it can see, so every write up to that one committed before
+      # the recorded time. The WAL position read afterwards marks the writes that started
+      # later: their commit time can only be later still (src/pglab/drills.py).
+      target=$(node_psql "$primary" -At -F '|' -c \
+        "WITH t AS MATERIALIZED (
+           SELECT (SELECT coalesce(max(seq), 0) FROM lab.heartbeat WHERE run_id = '$DRILL_ID')
+                    AS last_seq,
+                  clock_timestamp() AS at)
+         SELECT last_seq, at, extract(epoch FROM at) FROM t")
+      IFS='|' read -r last_seq target_time target_epoch <<<"$target"
+      target_lsn=$(node_query "$primary" 'SELECT pg_current_wal_insert_lsn()')
+      target_args=(--type=time "--target=$target_time")
+      info "recovery target: time $target_time (WAL insert position $target_lsn right after it)"
+      ;;
+    name)
+      # A named restore point is an exact position in the WAL, created just before the
+      # accident: a luxury only a drill has. The same statement reads the newest heartbeat it
+      # can see: every write up to that one committed before the restore point.
+      target=$(node_psql "$primary" -At -F '|' -c \
+        "SELECT (SELECT coalesce(max(seq), 0) FROM lab.heartbeat WHERE run_id = '$DRILL_ID'),
+                lsn, clock_timestamp(), extract(epoch FROM clock_timestamp())
+         FROM pg_create_restore_point('$DRILL_ID') AS lsn")
+      IFS='|' read -r last_seq target_lsn target_time target_epoch <<<"$target"
+      target_args=(--type=name "--target=$DRILL_ID")
+      record TARGET_NAME "$DRILL_ID"
+      info "recovery target: restore point $DRILL_ID at $target_lsn ($target_time)"
+      ;;
+  esac
+  if [ -z "$target_lsn" ] || [ -z "$target_time" ]; then
+    die "could not record the recovery target"
+  fi
   record TARGET_LSN "$target_lsn"
   record LAST_SEQ_BEFORE_TARGET "$last_seq"
   record TARGET_TIME "$target_time"
   record TARGET_EPOCH "$target_epoch"
-  info "recovery target: restore point $DRILL_ID at $target_lsn ($target_time)"
 
   log "4/7 the accident: DELETE FROM order_items (no WHERE clause)"
   deleted=$(node_psql "$primary" -At -c 'WITH d AS (DELETE FROM order_items RETURNING 1) SELECT count(*) FROM d')
@@ -183,10 +213,10 @@ pitr_drill() {
     "SELECT coalesce(last_archived_wal >= '$seg', false) FROM pg_stat_archiver"
   heartbeat_stop
 
-  log "6/7 restoring $primary to the restore point (stop, pgbackrest restore --delta, start)"
+  log "6/7 restoring $primary to the recovery target (stop, pgbackrest restore --delta, start)"
   t0=$(now_s)
   compose stop -t 60 "$primary" >/dev/null
-  offline "$primary" pgbackrest --stanza=topflow --delta --type=name "--target=$DRILL_ID" \
+  offline "$primary" pgbackrest --stanza=topflow --delta "${target_args[@]}" \
     --target-action=promote --log-level-console=warn restore
   compose start "$primary" >/dev/null
   wait_ready "$primary" 600
@@ -203,7 +233,8 @@ pitr_drill() {
 
   log "7/7 verifying the recovered database"
   LAB_PRIMARY_HOST=$primary
-  pglab "./lab pitr-drill ${measure[*]}" drill-report pitr --dir "/work/$DRILL_DIR" "${measure[@]}"
+  pglab "./lab pitr-drill --target $target_type ${measure[*]}" drill-report pitr \
+    --dir "/work/$DRILL_DIR" "${measure[@]}"
 }
 
 # Runs pg_rewind on the stopped node $1 against the running primary $2 and prints its output.
