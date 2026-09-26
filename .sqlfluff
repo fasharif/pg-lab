@@ -1,0 +1,5 @@
+# sqlfluff reads this file from the repository root (./lab check and CI pass the dialect and
+# rules on the command line). sql/security/30_row_level_security.sql is larger than sqlfluff's
+# default limit of 20,000 bytes per file, above which it skips a file with only a warning.
+[sqlfluff]
+large_file_skip_byte_limit = 0
