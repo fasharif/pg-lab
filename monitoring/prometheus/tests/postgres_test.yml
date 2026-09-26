@@ -188,3 +188,50 @@ tests:
             exp_annotations:
               summary: "Slot pg2 holds 2.794GiB of WAL on pg1"
               description: "WAL retained for a lagging or absent standby can fill the disk and stop the primary."
+
+  - name: a deadlock alerts at once
+    interval: 1m
+    input_series:
+      - series: 'pg_stat_database_deadlocks{node="pg1",datname="topflow"}'
+        values: "0 0 0 0 0 0 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PostgresDeadlocks
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: PostgresDeadlocks
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: pg1
+              datname: topflow
+            exp_annotations:
+              summary: "Deadlocks on pg1"
+              description: "1 deadlocks in 5 minutes; the log has the statements involved."
+
+  - name: a cache hit ratio below 95% under sustained reads, after 15 minutes
+    interval: 1m
+    input_series:
+      # 1,000 blocks a second found in shared_buffers, 200 read from outside: 83% hits.
+      - series: 'pg_stat_database_blks_hit{node="pg1",datname="topflow"}'
+        values: "0+60000x40"
+      - series: 'pg_stat_database_blks_read{node="pg1",datname="topflow"}'
+        values: "0+12000x40"
+      # A quiet node with the same ratio reads too little to matter.
+      - series: 'pg_stat_database_blks_hit{node="pg2",datname="topflow"}'
+        values: "0+600x40"
+      - series: 'pg_stat_database_blks_read{node="pg2",datname="topflow"}'
+        values: "0+120x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PostgresLowCacheHitRatio
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PostgresLowCacheHitRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: pg1
+            exp_annotations:
+              summary: "Cache hit ratio on pg1 is 83.33%"
+              description: "More than 5% of block reads miss shared_buffers under sustained load."
