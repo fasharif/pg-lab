@@ -35,8 +35,9 @@ if any table the API can read has no policy for it.
   published on 127.0.0.1 only, but depending on the Docker engine a connection through a
   published port can arrive from the network's gateway address, which is inside that subnet:
   these lines narrow where a login can come from, and the passwords remain the barrier.
-- The integration tests log in over the network: the right password works, a wrong one is
-  refused, and a client that insists on SCRAM (`require_auth=scram-sha-256`) connects.
+- The integration tests log in over the network as each application role with a client that
+  insists on SCRAM (`require_auth=scram-sha-256`), so each login proves the method; a wrong
+  password is refused, and so is a client that accepts only MD5.
 - Passwords are random, created by `./lab init` in `.env` (not committed); `.env.example` holds
   placeholders only.
 

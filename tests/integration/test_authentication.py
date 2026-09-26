@@ -13,9 +13,16 @@ ROLES = ("topflow_migrator", "topflow_app", "topflow_backoffice", "topflow_analy
 @pytest.mark.integration
 @pytest.mark.parametrize("role", ROLES)
 def test_right_password_logs_in_with_scram(role: str) -> None:
-    with connect(role) as conn:
+    # require_auth makes libpq refuse to finish a login by any method other than SCRAM-SHA-256,
+    # so a successful connection shows that the server asked this role for SCRAM.
+    with psycopg.connect(
+        user=role,
+        password=role_password(role),
+        require_auth="scram-sha-256",
+        target_session_attrs="any",
+        connect_timeout=5,
+    ) as conn:
         assert conn.execute("SELECT session_user").fetchone() == (role,)
-        # The server asked for SCRAM: libpq reports the method it completed.
         assert conn.pgconn.used_password
 
 
@@ -27,12 +34,15 @@ def test_wrong_password_is_refused(role: str) -> None:
 
 
 @pytest.mark.integration
-def test_client_can_insist_on_scram() -> None:
-    # require_auth makes libpq refuse any method other than SCRAM-SHA-256.
-    with psycopg.connect(
-        user="topflow_app", password=role_password("topflow_app"), require_auth="scram-sha-256"
-    ) as conn:
-        assert conn.execute("SELECT 1").fetchone() == (1,)
+def test_a_client_that_requires_md5_is_refused() -> None:
+    # The converse: a client that accepts only MD5 gives up, because the server asks for SCRAM.
+    with pytest.raises(psycopg.OperationalError, match='authentication method requirement "md5"'):
+        psycopg.connect(
+            user="topflow_app",
+            password=role_password("topflow_app"),
+            require_auth="md5",
+            connect_timeout=5,
+        )
 
 
 @pytest.mark.integration
