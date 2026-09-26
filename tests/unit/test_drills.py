@@ -13,19 +13,27 @@ import pytest
 from pglab.drills import (
     Check,
     DrillResult,
+    Recovered,
+    analyse_pitr,
     load_attempts,
     load_facts,
     longest_gap,
     node_sequence,
+    parse_lsn,
     render,
+    split_at_target,
 )
 from pglab.errors import LabError
 from pglab.heartbeat import Attempt, Heartbeat, default_dsn
 from tests.unit.test_reports import info
 
 
-def attempt(seq: int, at: float, ok: bool = True, node: str | None = "pg1") -> Attempt:
-    return Attempt(seq, at, ok, node=node if ok else None, committed_at=at if ok else None)
+def attempt(
+    seq: int, at: float, ok: bool = True, node: str | None = "pg1", lsn: str | None = None
+) -> Attempt:
+    return Attempt(
+        seq, at, ok, node=node if ok else None, committed_at=at if ok else None, wal_lsn=lsn
+    )
 
 
 def test_longest_gap_spans_the_failed_attempts() -> None:
@@ -116,8 +124,8 @@ class FakeConnection:
         self.server.rows.append(params[1])
         return self
 
-    def fetchone(self) -> tuple[str, float]:
-        return (self.server.node, 1000.0 + len(self.server.rows))
+    def fetchone(self) -> tuple[str, float, str]:
+        return (self.server.node, 1000.0 + len(self.server.rows), f"0/{len(self.server.rows):X}")
 
     def close(self) -> None:
         self.closed = True
@@ -152,6 +160,7 @@ def test_heartbeat_logs_failures_and_reconnects() -> None:
     recovered = beat.beat()
     assert recovered.ok
     assert recovered.node == "pg2"
+    assert recovered.wal_lsn == "0/2"
     assert server.rows == [1, 4]
     assert server.connections == 3
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
@@ -187,3 +196,91 @@ def test_default_dsn_targets_the_writable_node() -> None:
     assert "host=pg1,pg2" in dsn
     assert "port=5432,5432" in dsn
     assert "target_session_attrs=read-write" in dsn
+
+
+def test_parse_lsn_orders_wal_positions() -> None:
+    assert parse_lsn("0/0") == 0
+    assert parse_lsn("16/B374D4F8") == 0x16B374D4F8
+    assert parse_lsn("1/0") > parse_lsn("0/FFFFFFFF")
+    with pytest.raises(LabError, match="not a WAL position"):
+        parse_lsn("B374D4F8")
+    with pytest.raises(LabError, match="not a WAL position"):
+        parse_lsn("0/XYZ")
+
+
+# A PITR run: writes 1-4 were visible when the restore point (0/5000) was created; write 5 was
+# running at that moment (its WAL position is below the point); 6 and 7 started afterwards.
+PITR_ATTEMPTS = [
+    attempt(1, 100.0, lsn="0/1000"),
+    attempt(2, 100.1, lsn="0/2000"),
+    attempt(3, 100.2, ok=False),
+    attempt(4, 100.3, lsn="0/4000"),
+    attempt(5, 100.4, lsn="0/4F00"),
+    attempt(6, 100.5, lsn="0/6000"),
+    attempt(7, 100.6, lsn="0/7000"),
+]
+PITR_FACTS = {
+    "RUN_ID": "pitr-1",
+    "TARGET_NAME": "pitr-1",
+    "TARGET_LSN": "0/5000",
+    "TARGET_TIME": "2026-09-26 10:00:00+00",
+    "TARGET_EPOCH": "100.45",
+    "LAST_SEQ_BEFORE_TARGET": "4",
+    "COUNT_BEFORE": "10",
+    "CHECKSUM_BEFORE": "42",
+    "ROWS_DELETED": "10",
+    "RTO_SECONDS": "12.5",
+    "RECOVERY_DONE": "1",
+    "HEARTBEAT_INTERVAL": "0.1",
+}
+
+
+def test_split_at_target_uses_visibility_and_wal_positions_not_clocks() -> None:
+    split = split_at_target(PITR_ATTEMPTS, last_seq_before=4, target_lsn=parse_lsn("0/5000"))
+    assert [a.seq for a in split.before] == [1, 2, 4]
+    assert [a.seq for a in split.in_flight] == [5]
+    assert [a.seq for a in split.after] == [6, 7]
+
+
+def test_pitr_passes_when_recovery_keeps_exactly_the_writes_before_the_target() -> None:
+    # Write 5 was in flight: kept or not, both are correct.
+    for kept in ({1: 100.0, 2: 100.1, 4: 100.3}, {1: 100.0, 2: 100.1, 4: 100.3, 5: 100.4}):
+        result = analyse_pitr(PITR_FACTS, PITR_ATTEMPTS, Recovered(10, "42", kept), measured=True)
+        assert result.passed, [c for c in result.checks if not c.passed]
+    result = analyse_pitr(
+        PITR_FACTS,
+        PITR_ATTEMPTS,
+        Recovered(10, "42", {1: 100.0, 2: 100.1, 4: 100.3}),
+        measured=True,
+    )
+    timings = dict(result.timings)
+    loss = next(v for k, v in timings.items() if k.startswith("Data lost"))
+    reached = next(v for k, v in timings.items() if k.startswith("Recovery reached"))
+    # Lost: writes 5, 6 and 7; the last one committed 0.15 s after the target.
+    assert loss == pytest.approx(0.15)
+    assert reached == pytest.approx(0.15)
+    assert (
+        "Data lost by restoring in place",
+        "3 acknowledged writes, every one committed after the target",
+    ) in result.facts_table
+
+
+def test_pitr_fails_when_a_write_before_the_target_is_missing_or_one_after_is_replayed() -> None:
+    missing = analyse_pitr(
+        PITR_FACTS, PITR_ATTEMPTS, Recovered(10, "42", {1: 100.0, 4: 100.3}), measured=False
+    )
+    assert not missing.passed
+    replayed = analyse_pitr(
+        PITR_FACTS,
+        PITR_ATTEMPTS,
+        Recovered(10, "42", {1: 100.0, 2: 100.1, 4: 100.3, 6: 100.5}),
+        measured=False,
+    )
+    assert [c.description for c in replayed.checks if not c.passed] == [
+        "no write that started after the restore point was replayed"
+    ]
+    wrong_content = analyse_pitr(
+        PITR_FACTS, PITR_ATTEMPTS, Recovered(10, "41", {1: 1.0, 2: 1.0, 4: 1.0}), measured=False
+    )
+    assert not wrong_content.passed
+    assert all(value is None for _, value in wrong_content.timings)

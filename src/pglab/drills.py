@@ -1,10 +1,12 @@
-"""Analysis and reports of the point-in-time recovery and switchover drills.
+"""Analysis and reports of the reliability drills: point-in-time recovery and planned
+switchover.
 
-The drill scripts (scripts/pitr-drill.sh, scripts/switchover.sh) drive Docker and record what
-they did in a facts file (KEY=value lines) next to the heartbeat log. This module checks the
-outcome against the database and renders the report. Correctness checks (row counts,
-checksums, acknowledged writes) are always reported; durations (RTO, RPO window, write
-downtime) are shown only for measured runs.
+The drill functions in scripts/drills.sh drive Docker and record what they did in a facts file
+(KEY=value lines) next to the heartbeat log. This module checks the outcome and renders the
+report. The PITR analysis is a pure function of the facts, the heartbeat log and a
+few values read from the database by the caller, so they are unit-tested without a server.
+Correctness checks (row counts, checksums, acknowledged writes) are always reported; durations
+(RTO, data-loss window, write downtime) are shown only for measured runs.
 """
 
 from __future__ import annotations
@@ -52,6 +54,17 @@ def load_attempts(path: Path) -> list[Attempt]:
         if line.strip():
             attempts.append(Attempt(**json.loads(line)))
     return sorted(attempts, key=lambda a: a.seq)
+
+
+def parse_lsn(text: str) -> int:
+    """A WAL position such as '16/B374D4F8' as an integer, for comparisons."""
+    high, sep, low = text.strip().partition("/")
+    if not sep:
+        raise LabError(f"not a WAL position: {text!r}")
+    try:
+        return (int(high, 16) << 32) + int(low, 16)
+    except ValueError as exc:
+        raise LabError(f"not a WAL position: {text!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -114,7 +127,8 @@ def _acked(attempts: Sequence[Attempt]) -> list[Attempt]:
     return [a for a in attempts if a.ok and a.committed_at is not None]
 
 
-def _present(conn: Connection, run_id: str) -> dict[int, float]:
+def heartbeat_rows(conn: Connection, run_id: str) -> dict[int, float]:
+    """This run's heartbeat rows on the connected server: seq -> committed_at (epoch)."""
     rows = conn.execute(
         "SELECT seq, extract(epoch FROM committed_at)::float8 FROM lab.heartbeat WHERE run_id = %s",
         (run_id,),
@@ -133,21 +147,64 @@ def order_items_fingerprint(conn: Connection) -> tuple[int, str]:
     return int(row[0]), str(row[1])
 
 
+@dataclass(frozen=True)
+class Recovered:
+    """What the restored database holds, read by the caller after the PITR drill."""
+
+    count: int
+    checksum: str
+    present: dict[int, float]  # heartbeat seq -> committed_at (server clock, epoch seconds)
+
+
+@dataclass(frozen=True)
+class TargetSplit:
+    """The acknowledged heartbeat writes, classified against the recovery target.
+
+    before: visible to the statement that created the restore point, so committed (and their
+    commit records written) before it; recovery must keep every one.
+    after: the WAL insert position read inside their transaction is already past the restore
+    point, so their commit record comes after it; recovery must drop every one.
+    in_flight: neither (at most the one write running while the point was created); either
+    outcome is correct, so they are counted but not checked.
+    """
+
+    before: list[Attempt]
+    after: list[Attempt]
+    in_flight: list[Attempt]
+
+
+def split_at_target(
+    attempts: Sequence[Attempt], last_seq_before: int, target_lsn: int
+) -> TargetSplit:
+    before: list[Attempt] = []
+    after: list[Attempt] = []
+    in_flight: list[Attempt] = []
+    for attempt in _acked(attempts):
+        if attempt.seq <= last_seq_before:
+            before.append(attempt)
+        elif attempt.wal_lsn is not None and parse_lsn(attempt.wal_lsn) > target_lsn:
+            after.append(attempt)
+        else:
+            in_flight.append(attempt)
+    return TargetSplit(before, after, in_flight)
+
+
 def analyse_pitr(
-    conn: Connection, facts: dict[str, str], attempts: Sequence[Attempt], *, measured: bool
+    facts: dict[str, str], attempts: Sequence[Attempt], recovered: Recovered, *, measured: bool
 ) -> DrillResult:
-    target = float(fact(facts, "TARGET_EPOCH"))
-    run_id = fact(facts, "RUN_ID")
+    target_epoch = float(fact(facts, "TARGET_EPOCH"))
+    target_lsn_text = fact(facts, "TARGET_LSN")
     count_before, checksum_before = int(fact(facts, "COUNT_BEFORE")), fact(facts, "CHECKSUM_BEFORE")
-    count_after, checksum_after = order_items_fingerprint(conn)
     deleted = int(fact(facts, "ROWS_DELETED"))
-    present = _present(conn, run_id)
-    acked = _acked(attempts)
-    before_target = [a for a in acked if a.committed_at is not None and a.committed_at <= target]
-    after_target = [a for a in acked if a.committed_at is not None and a.committed_at > target]
-    missing = [a.seq for a in before_target if a.seq not in present]
-    survived_after = [seq for seq, at in present.items() if at > target]
-    last_restored = max((at for at in present.values() if at <= target), default=None)
+    split = split_at_target(
+        attempts, int(fact(facts, "LAST_SEQ_BEFORE_TARGET")), parse_lsn(target_lsn_text)
+    )
+    present = recovered.present
+    missing = [a.seq for a in split.before if a.seq not in present]
+    replayed_after = [a.seq for a in split.after if a.seq in present]
+    discarded = [a for a in _acked(attempts) if a.seq not in present]
+    last_recovered = max(present.values(), default=None)
+    last_discarded = max((a.committed_at for a in discarded if a.committed_at), default=None)
 
     result = DrillResult("Point-in-time recovery drill")
     result.checks = [
@@ -158,23 +215,23 @@ def analyse_pitr(
         ),
         Check(
             "order lines are back: same row count as before the accident",
-            count_after == count_before,
-            f"{count_after:,} rows (expected {count_before:,})",
+            recovered.count == count_before,
+            f"{recovered.count:,} rows (expected {count_before:,})",
         ),
         Check(
             "order lines are back: same content checksum as before the accident",
-            checksum_after == checksum_before,
-            f"sum of row hashes {checksum_after} (expected {checksum_before})",
+            recovered.checksum == checksum_before,
+            f"sum of row hashes {recovered.checksum} (expected {checksum_before})",
         ),
         Check(
-            "every write acknowledged before the recovery target is present",
-            not missing and bool(before_target),
-            f"{len(before_target):,} acknowledged before the target, {len(missing)} missing",
+            "every write committed before the restore point is present",
+            not missing and bool(split.before),
+            f"{len(split.before):,} committed before it, {len(missing)} missing",
         ),
         Check(
-            "nothing committed after the recovery target was replayed",
-            not survived_after,
-            f"{len(survived_after)} rows newer than the target after recovery",
+            "no write that started after the restore point was replayed",
+            not replayed_after and bool(split.after),
+            f"{len(split.after):,} started after it, {len(replayed_after)} replayed",
         ),
         Check(
             "the server finished recovery and accepts writes",
@@ -184,32 +241,63 @@ def analyse_pitr(
     ]
     result.facts_table = [
         ("Backup", f"full backup {facts.get('BACKUP_LABEL', '?')} (pgBackRest)"),
-        ("Recovery target", f"{fact(facts, 'TARGET_TIME')} (recorded just before the DELETE)"),
+        (
+            "Recovery target",
+            f"restore point `{facts.get('TARGET_NAME', '?')}` at WAL {target_lsn_text}, "
+            f"created at {facts.get('TARGET_TIME', '?')} just before the DELETE",
+        ),
         ("Accident", "`DELETE FROM order_items` without a WHERE clause"),
-        ("Restore", "`pgbackrest restore --delta --type=time --target-action=promote`"),
+        (
+            "Restore",
+            "`pgbackrest restore --delta --type=name --target=<restore point> "
+            "--target-action=promote`",
+        ),
         (
             "Timeline",
             f"{facts.get('TIMELINE_BEFORE', '?')} before, "
             f"{facts.get('TIMELINE_AFTER', '?')} after promotion",
         ),
-        ("Writes acknowledged after the target (discarded by design)", f"{len(after_target):,}"),
+        (
+            "Acknowledged client writes",
+            f"{len(split.before):,} before the restore point, {len(split.in_flight)} in flight "
+            f"while it was created, {len(split.after):,} after it",
+        ),
+        (
+            "Data lost by restoring in place",
+            f"{len(discarded):,} acknowledged writes, every one committed after the target",
+        ),
     ]
     rto = float(fact(facts, "RTO_SECONDS"))
-    rpo = target - last_restored if last_restored is not None else None
+    loss_window = (
+        last_discarded - target_epoch if (last_discarded is not None and discarded) else 0.0
+    )
+    reached = target_epoch - last_recovered if last_recovered is not None else None
     result.timings = [
         (
             "Recovery time (RTO): damaged primary stopped until the restored one accepts writes",
             rto if measured else None,
         ),
         (
-            "Data-loss window (RPO) before the target: target minus last recovered commit",
-            rpo if measured else None,
+            "Data lost (RPO of an in-place restore): from the target to the last acknowledged "
+            "write that the restore discarded",
+            loss_window if measured else None,
+        ),
+        (
+            "Recovery reached the target: target minus the last write it kept",
+            reached if measured else None,
         ),
     ]
     result.notes = [
         "The heartbeat client wrote one row every "
         f"{facts.get('HEARTBEAT_INTERVAL', '?')} s throughout; its log is the evidence for the "
-        "acknowledged-writes checks.",
+        "acknowledged-writes checks. A write counts as committed before the restore point when "
+        "the statement that created the point could see it, and as started after it when the "
+        "WAL position read inside its own transaction is past the point, so neither check "
+        "depends on clocks.",
+        "",
+        "Restoring in place goes back in time for the whole database: the writes the "
+        "application made after the accident are lost with it. Restoring a copy to a side "
+        "instance and moving the deleted rows back instead keeps them (docs/pitr.md).",
     ]
     return result
 
@@ -219,7 +307,7 @@ def analyse_switchover(
 ) -> DrillResult:
     run_id = fact(facts, "RUN_ID")
     old, new = fact(facts, "OLD_PRIMARY"), fact(facts, "NEW_PRIMARY")
-    present = _present(conn, run_id)
+    present = heartbeat_rows(conn, run_id)
     acked = _acked(attempts)
     missing = [a.seq for a in acked if a.seq not in present]
     nodes = node_sequence(attempts)
@@ -307,18 +395,20 @@ def render(result: DrillResult, info: RunInfo, *, command: str) -> str:
             "lcl",
         ),
         "",
-        "## Timings",
-        "",
-        table(
-            ["Measure", "Value"],
-            [
-                (label, PENDING if value is None else f"{value:.2f} s")
-                for label, value in result.timings
-            ],
-            "lr",
-        ),
-        "",
-        *result.notes,
-        "",
     ]
+    if result.timings:
+        lines += [
+            "## Timings",
+            "",
+            table(
+                ["Measure", "Value"],
+                [
+                    (label, PENDING if value is None else f"{value:.2f} s")
+                    for label, value in result.timings
+                ],
+                "lr",
+            ),
+            "",
+        ]
+    lines += [*result.notes, ""]
     return "\n".join(lines)

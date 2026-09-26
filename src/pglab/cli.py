@@ -202,13 +202,20 @@ def cmd_fingerprint(_: argparse.Namespace) -> int:
 def cmd_drill_report(args: argparse.Namespace) -> int:
     folder = Path(args.dir)
     facts = drills.load_facts(folder / "facts.env")
-    attempts = drills.load_attempts(folder / "heartbeat.jsonl")
-    analyse = drills.analyse_pitr if args.drill == "pitr" else drills.analyse_switchover
     with connect(application_name="pglab-drill") as conn:
         info = run_info(conn, measured=args.measure, runs=1)
-        result = analyse(conn, facts, attempts, measured=args.measure)
+        if args.drill == "pitr":
+            count, checksum = drills.order_items_fingerprint(conn)
+            recovered = drills.Recovered(
+                count, checksum, drills.heartbeat_rows(conn, drills.fact(facts, "RUN_ID"))
+            )
+            attempts = drills.load_attempts(folder / "heartbeat.jsonl")
+            result = drills.analyse_pitr(facts, attempts, recovered, measured=args.measure)
+        else:
+            attempts = drills.load_attempts(folder / "heartbeat.jsonl")
+            result = drills.analyse_switchover(conn, facts, attempts, measured=args.measure)
     text = drills.render(result, info, command=args.label)
-    default = REPORTS_DIR / ("pitr-drill.md" if args.drill == "pitr" else "switchover-drill.md")
+    default = REPORTS_DIR / f"{args.drill}-drill.md"
     _write(Path(args.output) if args.output else default, text)
     (folder / "report.md").write_text(text, encoding="utf-8", newline="\n")
     for check in result.checks:

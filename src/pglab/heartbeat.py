@@ -3,8 +3,11 @@
 Used by the drills to see a failover or recovery from the client's side: every attempt is
 logged as one JSON line with its outcome, so the analysis can compute the longest gap
 between two acknowledged writes (write downtime) and check that every acknowledged write
-survived. It connects with libpq's multi-host syntax and target_session_attrs=read-write,
-so after a switchover it reconnects to whichever node accepts writes.
+survived. Each acknowledged write also records the server's WAL insert position read inside
+its transaction: its commit record comes later in the WAL, which lets the PITR analysis tell
+for certain that a write started after the recovery target. It connects with libpq's
+multi-host syntax and target_session_attrs=read-write, so after a switchover it reconnects to
+whichever node accepts writes.
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ class Attempt:
     node: str | None = None
     committed_at: float | None = None  # server clock, seconds since the epoch
     error: str | None = None
+    # pg_current_wal_insert_lsn() inside the write's transaction: a lower bound of its commit LSN.
+    wal_lsn: str | None = None
 
 
 def default_dsn(hosts: str) -> str:
@@ -85,11 +90,14 @@ class Heartbeat:
             row = conn.execute(
                 "INSERT INTO lab.heartbeat (run_id, seq, sent_at) "
                 "VALUES (%s, %s, to_timestamp(%s)) "
-                "RETURNING node, extract(epoch FROM committed_at)::float8",
+                "RETURNING node, extract(epoch FROM committed_at)::float8,"
+                " pg_current_wal_insert_lsn()::text",
                 (self.run_id, self.seq, sent_at),
             ).fetchone()
-            node, committed = row if row else (None, None)
-            attempt = Attempt(self.seq, sent_at, True, node=node, committed_at=committed)
+            node, committed, wal_lsn = row if row else (None, None, None)
+            attempt = Attempt(
+                self.seq, sent_at, True, node=node, committed_at=committed, wal_lsn=wal_lsn
+            )
         except psycopg.Error as exc:
             if self.conn is not None:
                 self.conn.close()

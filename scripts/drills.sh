@@ -121,6 +121,7 @@ pitr_drill() {
   require_env
   ensure_runner
   local measure=() primary standby label target deleted seg t0 t1
+  local count checksum last_seq target_lsn target_time target_epoch
   while [ $# -gt 0 ]; do
     case $1 in
       --measure) measure=(--measure); shift ;;
@@ -149,16 +150,25 @@ pitr_drill() {
   heartbeat_start "$primary"
   sleep 3
 
-  log "3/7 recording the state of order_items and the recovery target"
+  log "3/7 recording the state of order_items and creating the recovery target"
   read -r count checksum < <(runner python -m pglab fingerprint)
   record COUNT_BEFORE "$count"
   record CHECKSUM_BEFORE "$checksum"
   sleep 1
-  target=$(node_psql "$primary" -At -c \
-    "SELECT t::text || '|' || extract(epoch FROM t) FROM (SELECT clock_timestamp() AS t) AS s")
-  record TARGET_TIME "${target%%|*}"
-  record TARGET_EPOCH "${target##*|}"
-  info "recovery target: ${target%%|*}"
+  # A named restore point is an exact position in the WAL, unlike a timestamp (commit records
+  # carry their own times). The same statement reads the newest heartbeat it can see: every
+  # write up to that one committed before the restore point.
+  target=$(node_psql "$primary" -At -F '|' -c \
+    "SELECT (SELECT coalesce(max(seq), 0) FROM lab.heartbeat WHERE run_id = '$DRILL_ID'),
+            lsn, clock_timestamp(), extract(epoch FROM clock_timestamp())
+     FROM pg_create_restore_point('$DRILL_ID') AS lsn")
+  IFS='|' read -r last_seq target_lsn target_time target_epoch <<<"$target"
+  record TARGET_NAME "$DRILL_ID"
+  record TARGET_LSN "$target_lsn"
+  record LAST_SEQ_BEFORE_TARGET "$last_seq"
+  record TARGET_TIME "$target_time"
+  record TARGET_EPOCH "$target_epoch"
+  info "recovery target: restore point $DRILL_ID at $target_lsn ($target_time)"
 
   log "4/7 the accident: DELETE FROM order_items (no WHERE clause)"
   deleted=$(node_psql "$primary" -At -c 'WITH d AS (DELETE FROM order_items RETURNING 1) SELECT count(*) FROM d')
@@ -172,10 +182,10 @@ pitr_drill() {
     "SELECT coalesce(last_archived_wal >= '$seg', false) FROM pg_stat_archiver"
   heartbeat_stop
 
-  log "6/7 restoring $primary to the target (stop, pgbackrest restore --delta, start)"
+  log "6/7 restoring $primary to the restore point (stop, pgbackrest restore --delta, start)"
   t0=$(now_s)
   compose stop -t 60 "$primary" >/dev/null
-  offline "$primary" pgbackrest --stanza=topflow --delta --type=time "--target=${target%%|*}" \
+  offline "$primary" pgbackrest --stanza=topflow --delta --type=name "--target=$DRILL_ID" \
     --target-action=promote --log-level-console=warn restore
   compose start "$primary" >/dev/null
   wait_ready "$primary" 600
