@@ -162,11 +162,11 @@ alternatives are applied in a transaction that is rolled back. From `reports/rls
 
 | Planned as | Estimated rows | Page | Cost without index scans | Total |
 | --- | ---: | --- | ---: | --- |
-| owner, no RLS | 10,107 | index scan, 18 buffers | 469x | index-only scan, 13 buffers |
-| lab policies | 1,684 | index scan, 21 buffers | 77x | index-only scan, 143 buffers |
-| lab policies, index without `userId` | 1,684 | index scan, 21 buffers | 78x | bitmap heap scan, 6,764 buffers |
-| transparent policy | 275 | index scan, 21 buffers | 1.2x | index-only scan, 143 buffers |
-| lookup inside the policy | 27 | bitmap heap scan and sort, 6,899 buffers | 1.0x | bitmap heap scan, 6,899 buffers |
+| owner, no RLS | 9,627 | index scan, 18 buffers | 447x | index-only scan, 13 buffers |
+| lab policies | 1,604 | index scan, 21 buffers | 74x | index-only scan, 143 buffers |
+| lab policies, index without `userId` | 1,604 | index scan, 21 buffers | 74x | bitmap heap scan, 6,764 buffers |
+| transparent policy | 251 | index scan, 21 buffers | 1.0x | index-only scan, 143 buffers |
+| lookup inside the policy | 26 | bitmap heap scan and sort, 6,899 buffers | 1.0x | bitmap heap scan, 6,899 buffers |
 
 *Cost without index scans* is the planner's cost for the best page plan it finds with index
 scans disabled, as a multiple of the chosen plan's cost: how far the page is from losing its
@@ -174,21 +174,22 @@ index. What each design does to the estimate:
 
 - **Membership lookup inside the policy**, `"organizationId" = (SELECT member_org())`, the
   usual first design and the lab's first version. The planner cannot know the subquery's value
-  when it plans, so it assumes the average organisation's share of the orders and expects 27
-  rows. Fetching 25 rows with a bitmap scan and sorting them looks cheapest; the page reads all
-  9,943 orders (6,899 buffers) to return 20.
+  when it plans, so it assumes the average organisation's share of the orders and expects 26
+  rows. Fetching that few rows with a bitmap scan and sorting them looks cheapest; the page reads
+  all 9,943 orders (6,899 buffers) to return 20.
 - **Transparent policy**, `"organizationId" = app.org_id() OR ...`, where `app.org_id()` is an
   SQL function that PostgreSQL inlines. The planner evaluates `current_setting()` while
   planning, so it knows the organisation, but it applies the organisation's share twice, once
   for the query's predicate and once for the policy's, as if they were independent. The largest
   organisation has 5% of the orders, so the estimate falls to 5% of the real count, and to half
-  of that for the membership gate: 275 rows. The smaller the organisation, the smaller the
-  fraction. The page keeps its index here, but the bitmap plan costs only 1.2 times as much
-  (675 against 585): a different statistics sample or a little more data can tip it.
+  of that for the membership gate: 251 rows. The smaller the organisation, the smaller the
+  fraction. The page keeps its index in this run, but only just: the bitmap plan costs 622
+  against 619 for the index scan, so a different statistics sample or a little more data can
+  tip it.
 - **Tenant-row function**, the lab's design. PL/pgSQL functions are never inlined, so the
   planner uses its default selectivity for a boolean function, one third, and one half for the
   membership gate: it expects one sixth of the real rows whichever the organisation, and the
-  bitmap plan costs 77 times the index scan. The function is declared `COST 10`: with the
+  bitmap plan costs 74 times the index scan. The function is declared `COST 10`: with the
   default cost of 100 for non-C functions, the planner ran the organisation's count as a
   parallel index-only scan to share out the function calls.
 

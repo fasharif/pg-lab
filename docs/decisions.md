@@ -67,7 +67,8 @@ e-mail domains are reserved example domains.
 **Decision.** The workload is ranked by shared buffers touched (`EXPLAIN (ANALYZE, BUFFERS)`),
 which depends on data and plan, not on load. Default runs use `TIMING OFF, SUMMARY OFF` and
 strip the `I/O Timings` lines, so no duration reaches a report. `--measure` records the median of
-N runs (server-side execution time) for a quiet machine.
+N runs of server-side planning plus execution time, with the result rows serialised to text
+(`EXPLAIN (ANALYZE, SERIALIZE TEXT, TIMING OFF, SUMMARY ON)`), for a quiet machine.
 
 **Consequences.** Reports can be generated anywhere and compared. Every timing column in the
 committed reports says "pending a measured run" (docs/benchmarking.md).
@@ -141,14 +142,14 @@ the permissive policy calls `app.is_tenant_row(organisation, owner)`, a PL/pgSQL
 own pool.
 
 **Alternatives.** The membership lookup inside the permissive policy (the first version) made the
-planner expect 27 of 9,943 rows and read every order of the organisation for one page. A
+planner expect 26 of 9,943 rows and read every order of the organisation for one page. A
 transparent policy with inlined settings kept the index, but the planner applied the
-organisation's share twice and expected 275 rows; the bitmap plan cost only 15% more than the
-index scan.
+organisation's share twice and expected 251 rows; the bitmap plan cost less than 1% more than
+the index scan.
 
 **Consequences.** A user who claims an organisation they do not belong to sees nothing. The
 function gets a fixed default selectivity, so the estimate is a sixth of the real rows for every
-organisation: wrong, but predictably so, and the bitmap plan costs 77 times the index scan
+organisation: wrong, but predictably so, and the bitmap plan costs 74 times the index scan
 (`reports/rls-plans.md`). A function call per row costs CPU, which this functional run did not
 measure. Registering a trade account, accepting an invitation and KYC cross tenants and belong
 to the staff role in this model.

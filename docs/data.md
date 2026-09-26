@@ -24,20 +24,21 @@ SCALE is the approximate number of order lines. Every other table is sized from 
 | `users` | 20 staff, the organisation members and SCALE / 100 retail customers |
 | `products` | SCALE / 200, between 1,000 and 50,000, in 40 categories |
 
-At SCALE=1000000 the load behind the committed reports wrote 4,059,979 rows across the 18
-tables (`./lab seed` prints the count per table).
+At SCALE=1000000 the load behind the committed reports wrote 4,059,972 rows across the 18
+tables; `./lab seed` writes the count per table to `reports/dataset.md`.
 
 ## Shape
 
 - **Time.** Orders, quote requests and audit entries are spread evenly over the two years before
   the anchor (the hour the data was generated) and inserted in time order, as an append-only
-  table would be, so `createdAt` correlates almost perfectly with the physical order (0.9999 for
-  `orders` and 1 for `audit_logs` in `pg_stats` at SCALE=1000000). Statuses follow age: old orders are delivered or cancelled, orders
-  from the last week are pending, confirmed, processing or dispatched.
+  table would be, so `createdAt` correlates almost perfectly with the physical order (0.9998 for
+  `orders` and 1.0000 for `audit_logs` in `pg_stats` at SCALE=1000000, `reports/dataset.md`).
+  Statuses follow age: old orders are delivered or cancelled, orders from the last week are
+  pending, confirmed, processing or dispatched.
 - **Skew.** A trade order goes to organisation `1 + floor(n × u^2.5)` for a uniform `u`, so
   organisation 1 is by far the largest customer and most organisations have a handful of
   orders. At SCALE=1000000 the largest of the 500 organisations had 9,943 of the 119,956
-  trade orders.
+  trade orders and the median one 146 (`reports/dataset.md`).
   Retail customers and products are skewed the same way, less strongly.
 - **Consistency.** Order totals equal the sum of their lines, because the header and the lines
   are computed by the same function (`lab.order_lines`). VAT is 5%; retail orders under

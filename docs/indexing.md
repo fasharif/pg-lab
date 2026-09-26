@@ -73,11 +73,12 @@ After the casebook, all indexes on `audit_logs` together take 181 MB, 0.69 times
 
 The largest single cost is the id type. TopFlow's ids are UUIDs stored as `TEXT` (36 characters),
 so every primary key, foreign key and composite index that contains an id carries 37 bytes per
-entry instead of 16. The same one million audit ids, indexed freshly both ways:
+entry instead of 16. The same one million audit ids take 56.3 MB in the primary key's text index
+and 30.1 MB in an index on the ids cast to `uuid` (`reports/indexing.md`, "Alternatives
+measured"):
 
 ```sql
-CREATE INDEX lab_tmp_id_text ON audit_logs (id);            -- 56 MB
-CREATE INDEX lab_tmp_id_uuid ON audit_logs ((id::uuid));     -- 30 MB
+CREATE INDEX "lab_audit_id_uuid" ON audit_logs ((id::uuid));
 ```
 
 That is why `(userId, createdAt)` is the biggest index in the table. Moving TopFlow's ids to the
