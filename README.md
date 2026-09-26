@@ -79,7 +79,7 @@ Each answer is a script that anyone can rerun, and each report says how it was p
   ([docs/replication.md](docs/replication.md)).
 - **Security.** Five application roles and three infrastructure roles with least privilege
   (column-level `UPDATE` and state-checking policies for customer writes), SCRAM-only
-  authentication, and row-level security for tenant isolation, tested by 84 pgTAP checks on
+  authentication, and row-level security for tenant isolation, tested by 96 pgTAP checks on
   every tenant table with generated tenants. The trust boundary is stated plainly: the policies
   stop queries that forget their tenant filter, not code that can run arbitrary SQL as the API
   role ([docs/security.md](docs/security.md)).
@@ -173,7 +173,7 @@ with a random value. `.env` is ignored by git.
 | Command | What it runs |
 | --- | --- |
 | `./lab check` | ruff, mypy --strict, 72 unit tests (plans recorded from the lab, report rendering, drill analysis, monitoring check, SQL Server parser), workload and casebook validation, sqlfluff syntax checks of `sql/lab`, `sql/security`, `sql/partitioning` and `sqlserver/sql` (not the generator, the pgTAP suites or the workload statements), promtool on the alert rules and their 10 scenarios, shellcheck |
-| `./lab test` | 165 pgTAP tests (schema; roles, table and column privileges; tenant isolation and customer writes; SCRAM and pg_hba; partition functions, which need `./lab partition` first) and 20 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS, the policy design, casebook indexes rebuilt when invalid or outdated) |
+| `./lab test` | 179 pgTAP tests (schema; roles, table and column privileges; tenant isolation and customer writes; SCRAM and pg_hba; partition functions, which need `./lab partition` first) and 20 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS, the policy design, casebook indexes rebuilt when invalid or outdated) |
 | `./lab casebook` | the ten plan checks, before and after, and the rewrite's result check |
 | `./lab ci` | the whole lab at LAB_SCALE: up, seed, casebook, partitions and maintenance, tests, RLS plans, PITR drill, replica, switchover and back, failover drill, tests again, monitoring check |
 

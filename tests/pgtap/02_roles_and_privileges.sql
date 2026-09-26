@@ -1,7 +1,7 @@
 -- Least privilege: role attributes, table and column privileges, ownership, DDL rights.
 BEGIN;
 SET LOCAL search_path = public, tap;
-SELECT plan(43);
+SELECT plan(45);
 
 -- Role attributes
 SELECT isnt_superuser(r, format('%s is not a superuser', r))
@@ -72,6 +72,8 @@ SELECT table_privs_are('public', 'audit_logs', 'topflow_backoffice', ARRAY['SELE
     'audit entries are append-only for staff too');
 SELECT table_privs_are('public', 'order_status_events', 'topflow_backoffice', ARRAY['SELECT', 'INSERT'],
     'order history is append-only for staff');
+SELECT table_privs_are('public', 'order_status_events', 'topflow_app', ARRAY['SELECT', 'INSERT'],
+    'order history is append-only for the API (policies limit what it appends)');
 SELECT table_privs_are('public', 'quotation_items', 'topflow_app', ARRAY['SELECT'],
     'customers never write quotation lines');
 SELECT table_privs_are('public', 'products', 'topflow_app', ARRAY['SELECT'],
@@ -110,6 +112,8 @@ SELECT function_privs_are('app', 'next_document_number', ARRAY['text'], 'topflow
     ARRAY['EXECUTE'], 'the API takes document numbers through app.next_document_number()');
 SELECT is_definer('app', 'next_document_number', ARRAY['text'],
     'app.next_document_number() runs as the owner');
+SELECT is_definer('app', 'continues_order_timeline', ARRAY['text', 'text', 'text'],
+    'app.continues_order_timeline() reads order history as the owner (no policy recursion)');
 
 -- DDL
 SELECT is(has_schema_privilege('topflow_app', 'public', 'CREATE'), false,

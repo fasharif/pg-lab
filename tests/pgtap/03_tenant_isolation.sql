@@ -15,7 +15,7 @@
 -- transaction and checks that the same probes then see other tenants' rows.
 BEGIN;
 SET LOCAL search_path = public, tap;
-SELECT plan(84);
+SELECT plan(96);
 
 CREATE TEMP TABLE ctx AS
 SELECT lab.uid('org', 1) AS org_a,
@@ -67,6 +67,26 @@ CROSS JOIN LATERAL (VALUES ('a', c.org_a, c.user_a), ('b', c.org_b, c.user_b)) A
 INSERT INTO audit_logs (id, "userId", action, "entityType", "entityId", "organizationId")
 SELECT 'rls-audit-' || t.tenant, c.user_a, 'RLS_TEST', 'Organization', t.org, t.org
 FROM ctx AS c CROSS JOIN LATERAL (VALUES ('a', c.org_a), ('b', c.org_b)) AS t (tenant, org);
+-- The open orders' history: one first event each, as TopFlow's checkout records it.
+DELETE FROM order_status_events
+WHERE "orderId" IN (SELECT order_open FROM fx UNION ALL SELECT order_open2 FROM fx);
+INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId", "createdAt")
+SELECT 'rls-event-open-' || v.n, v.order_id, NULL, 'CONFIRMED', c.user_a,
+       (now() AT TIME ZONE 'UTC') - interval '1 day'
+FROM ctx AS c, fx AS f
+CROSS JOIN LATERAL (VALUES (1, f.order_open), (2, f.order_open2)) AS v (n, order_id);
+-- Templates for the rows a customer writes when placing an order: copies of generated rows, so
+-- that every NOT NULL column has a value, turned into a new open order of A and one line.
+CREATE TEMP TABLE new_order AS
+SELECT o.* FROM orders AS o WHERE o.id = (SELECT order_open FROM fx);
+UPDATE new_order
+SET id = 'rls-new-order', "orderNumber" = 'TF-SO-RLS-NEW', status = 'CONFIRMED',
+    "paymentStatus" = 'UNPAID', "paidAt" = NULL, "dispatchedAt" = NULL, "deliveredAt" = NULL,
+    "cancelledAt" = NULL, "quotationId" = NULL,
+    "organizationId" = (SELECT org_a FROM ctx), "userId" = (SELECT user_a FROM ctx);
+CREATE TEMP TABLE new_line AS
+SELECT i.* FROM order_items AS i ORDER BY i.id LIMIT 1;
+UPDATE new_line SET id = 'rls-new-line', "orderId" = 'rls-new-order';
 
 -- ─── Truth: what A's owner, acting for A, should see ───────────────────────
 CREATE TEMP TABLE expected (table_name text, id text, PRIMARY KEY (table_name, id));
@@ -176,8 +196,8 @@ SELECT unnest(ARRAY[
     'quotations', 'quotation_items', 'audit_logs'
 ]) AS table_name;
 
-GRANT SELECT ON ctx, fx, expected, truth, tenant_tables TO topflow_app, topflow_backoffice,
-    topflow_analyst;
+GRANT SELECT ON ctx, fx, expected, truth, tenant_tables, new_order, new_line
+    TO topflow_app, topflow_backoffice, topflow_analyst;
 GRANT EXECUTE ON FUNCTION pg_temp.count_outside(text), pg_temp.count_all(text),
     pg_temp.outcome(text), pg_temp.act_as(text, text) TO topflow_app;
 
@@ -293,6 +313,16 @@ SELECT is(pg_temp.outcome(format(
       WHERE id = %L$$, order_open)),
     '1 rows', 'the owner can cancel an open, unpaid order of the organisation')
 FROM fx;
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId")
+      VALUES ('rls-event-cancel', %L, 'CONFIRMED', 'CANCELLED', %L)$$, f.order_open, c.user_a)),
+    '1 rows', 'the owner records the cancellation in the order''s history, in their own name')
+FROM ctx AS c, fx AS f;
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId")
+      VALUES ('rls-event-cancel-2', %L, 'CONFIRMED', 'CANCELLED', %L)$$, f.order_open, c.user_a)),
+    'error 42501', 'the same cancellation cannot be recorded twice')
+FROM ctx AS c, fx AS f;
 SELECT is(pg_temp.outcome(format($$UPDATE orders SET status = 'CANCELLED' WHERE id = %L$$,
                                  order_done)),
           '0 rows', 'a delivered and paid order cannot be cancelled by the customer')
@@ -300,6 +330,47 @@ FROM fx;
 SELECT is(pg_temp.outcome(format($$DELETE FROM orders WHERE id = %L$$, order_done)),
           'error 42501', 'the API role cannot delete orders at all')
 FROM fx;
+
+-- Order lines and history: written while placing an order, then closed.
+SELECT is(pg_temp.outcome($$INSERT INTO orders SELECT * FROM pg_temp.new_order$$), '1 rows',
+          'a customer can place an open, unpaid order');
+SELECT is(pg_temp.outcome($$INSERT INTO order_items SELECT * FROM pg_temp.new_line$$), '1 rows',
+          'and add its lines while placing it');
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId")
+      VALUES ('rls-new-event-other', 'rls-new-order', NULL, 'CONFIRMED', %L)$$, buyer_a)),
+    'error 42501', 'the order''s first event cannot be written in another member''s name')
+FROM ctx;
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId")
+      VALUES ('rls-new-event', 'rls-new-order', NULL, 'CONFIRMED', %L)$$, user_a)),
+    '1 rows', 'the customer records the order''s first event in their own name')
+FROM ctx;
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId")
+      VALUES ('rls-new-event-2', 'rls-new-order', NULL, 'CONFIRMED', %L)$$, user_a)),
+    'error 42501', 'the first event cannot be recorded twice')
+FROM ctx;
+SELECT is(pg_temp.outcome(
+    $$INSERT INTO order_items (id, "orderId", "productName", sku, "unitPrice", quantity,
+                               "totalPrice")
+      VALUES ('rls-new-line-2', 'rls-new-order', 'x', 'X', 0.01, 1000, 10)$$),
+    'error 42501', 'once the order''s history has started, no line can be added to it');
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_items (id, "orderId", "productName", sku, "unitPrice", quantity,
+                               "totalPrice")
+      VALUES ('rls-line-done', %L, 'x', 'X', 0.01, 1000, 10)$$, order_done)),
+    'error 42501', 'a customer cannot add a line to a delivered, paid order')
+FROM fx;
+SELECT is(pg_temp.outcome(format(
+    $$INSERT INTO order_status_events (id, "orderId", "fromStatus", "toStatus", "actorId")
+      VALUES ('rls-event-forged', %L, 'DELIVERED', 'CANCELLED', %L)$$, f.order_done, c.user_a)),
+    'error 42501', 'a customer cannot record a status change the order did not make')
+FROM ctx AS c, fx AS f;
+SELECT is(pg_temp.outcome($$UPDATE order_status_events SET "toStatus" = 'CANCELLED'$$),
+          'error 42501', 'order history cannot be changed');
+SELECT is(pg_temp.outcome($$DELETE FROM order_status_events$$), 'error 42501',
+          'order history cannot be deleted');
 SELECT is(pg_temp.outcome(format($$UPDATE quotations SET total = 0.01 WHERE id = %L$$,
                                  quote_open)),
           'error 42501', 'a customer cannot change the prices of a quotation')
@@ -405,6 +476,8 @@ SELECT is((SELECT count(*) FROM orders), (SELECT orders_retail FROM truth),
 
 -- ─── Staff and analyst ─────────────────────────────────────────────────────
 RESET ROLE;
+-- The write checks placed one order since the truth was computed.
+UPDATE truth SET orders_all = (SELECT count(*) FROM orders);
 SET LOCAL ROLE topflow_backoffice;
 SELECT is((SELECT count(*) FROM orders), (SELECT orders_all FROM truth),
           'back-office staff see every organisation''s orders');

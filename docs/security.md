@@ -11,7 +11,7 @@ Tests: `tests/pgtap/02_roles_and_privileges.sql`, `03_tenant_isolation.sql`,
 | --- | --- | --- |
 | `topflow_owner` | no | Owns the database, schema `public` and every TopFlow object. |
 | `topflow_migrator` | yes | Runs migrations. Its sessions start as `topflow_owner` (`ALTER ROLE ... SET role`), so new objects belong to the owner role, not to a person. |
-| `topflow_app` | yes | The customer-facing API, always inside row-level security. `UPDATE` only on the columns a customer flow changes (column privileges): an order's status and cancellation fields, a quotation's status and response fields, a request's status, a member's role and approval limit. No `DELETE` on orders, no `UPDATE` or `DELETE` on audit entries or order history, no `INSERT` of members or organisations, no privilege on the shared document counters. |
+| `topflow_app` | yes | The customer-facing API, always inside row-level security. `UPDATE` only on the columns a customer flow changes (column privileges): an order's status and cancellation fields, a quotation's status and response fields, a request's status, a member's role and approval limit. Order lines only while placing an order, and order history only as its own flows write it (policies). No `DELETE` on orders, no `UPDATE` or `DELETE` on audit entries or order history, no `INSERT` of members or organisations, no privilege on the shared document counters. |
 | `topflow_backoffice` | yes | Top Flow staff. Every tenant, same append-only rules, `DELETE` only where the back office deletes (draft quotations, empty categories, members, addresses). Runs the flows that cross tenants: registering a trade account, accepting an invitation, KYC review. |
 | `topflow_analyst` | yes | Read-only reporting (`default_transaction_read_only`). Every tenant, but no personal contact data: e-mail, names, phone numbers, street addresses and delivery addresses are excluded by column privileges. |
 | `replicator` | yes | Streaming replication and `pg_basebackup` only. |
@@ -81,6 +81,15 @@ customer may do to their own rows. Three more layers do:
   the caller's own name, and an expired quotation cannot be accepted. A request for a quotation
   starts as submitted and can only be cancelled, closed or sent back for review. The policies
   check the states, not every pair of states; the API's state machines stay the reference.
+- **Order lines and history.** TopFlow writes an order, then its lines, then its first status
+  event, in one transaction. A line can be added only to an open, unpaid order whose history has
+  not started, so nobody appends lines to a paid or delivered order. A customer appends to an
+  order's history only what their own flows write: the first event of an order they place and
+  the cancellation of an open order, in their own name. Each event must continue the order's
+  timeline (its `fromStatus` is the status the last event reached) and end in the status the
+  order has now, which `app.continues_order_timeline()` checks as the owner, because a policy on
+  `order_status_events` cannot query that table itself. A customer cannot record a status the
+  order never took, repeat an event, or write one in someone else's name.
 - **Owner-only membership.** Only the organisation's owner (`app.org_role()`, TopFlow's
   `MEMBERS_MANAGE`) changes a member's role or approval limit, removes a member, or sees and
   manages invitations, which hold e-mail addresses. There is no `INSERT` on
@@ -94,8 +103,9 @@ shares. The API roles have no privilege on it; `app.next_document_number(key)`, 
 
 What the database does not check: the values the API computes. The prices of a new order and its
 lines, or which lines a new quotation request holds, come from the API, and checking them would
-mean repeating its pricing in SQL. The database stops changes to amounts after the fact, not a
-wrong amount at creation.
+mean repeating its pricing in SQL. Nor does it check the time stamps the API writes, such as an
+event's `createdAt`. The database stops changes to amounts and lines once an order is placed,
+not a wrong amount at creation.
 
 ### Trust boundary
 
@@ -122,9 +132,9 @@ design gives.
 
 ### What the tests check
 
-`tests/pgtap/03_tenant_isolation.sql` runs 84 checks on the generated data with two generated
-tenants, A and B, and a few rows adjusted inside the test transaction (an open order, an open
-quotation, one invitation each), all rolled back at the end.
+`tests/pgtap/03_tenant_isolation.sql` runs 96 checks on the generated data with two generated
+tenants, A and B, and a few rows adjusted inside the test transaction (open orders with a
+one-event history, an open quotation, one invitation each), all rolled back at the end.
 
 - **Reads, for every tenant table** (users, organisations, members, invitations, addresses,
   orders and their lines and history, requests for quotations and their lines, quotations and
@@ -136,10 +146,13 @@ quotation, one invitation each), all rolled back at the end.
   invitation in B's name fails; updating B's order, address, request or invitation changes no
   row; adding B's owner to A as a member is refused, so their profile stays invisible.
 - **Changes to A's own rows**: every case in "What a customer may change" above, both the
-  refusals (mark an order paid, change its amount, move it to delivered, change a quotation's
-  prices or validity, accept an expired quotation, approve in someone else's name, a buyer
-  promoting themselves) and the allowed paths (cancel an open order, accept a valid quotation,
-  the owner changing a member's role).
+  refusals (mark an order paid, change its amount, move it to delivered, add a line to a
+  delivered and paid order or to one whose history has started, record a status change the order
+  did not make, repeat an event or write one in another member's name, change or delete order
+  history, change a quotation's prices or validity, accept an expired quotation, approve in
+  someone else's name, a buyer promoting themselves) and the allowed paths (place an order with
+  its lines and first event, cancel an open order and record the cancellation, accept a valid
+  quotation, the owner changing a member's role).
 - A forged organisation id, a missing context, a retail customer, the trust boundary, and the
   staff and analyst roles.
 

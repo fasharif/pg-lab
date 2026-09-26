@@ -23,8 +23,10 @@
 -- measurements.
 --
 -- On top of the tenant policies, restrictive policies limit the states a customer can move a
--- row into (cancel an order, answer a quotation), and membership changes need the
--- organisation's owner. Column privileges (20_privileges.sql) limit which columns change.
+-- row into (cancel an order, answer a quotation) and what they may append to an order (lines
+-- only while placing it, status events that continue its timeline), and membership changes
+-- need the organisation's owner. Column privileges (20_privileges.sql) limit which columns
+-- change.
 --
 -- Trust boundary: the policies trust app.user_id and app.org_id, which any topflow_app
 -- session can set. They stop API code that forgets a tenant filter; they do not stop code
@@ -113,6 +115,33 @@ AS $$
     )
 $$;
 
+-- True when a status event (from_status -> to_status) continues the timeline of one of the
+-- caller's orders: from_status is the status the order's last event reached (NULL for its first
+-- event) and to_status is the status the order has now. SECURITY DEFINER because a policy on
+-- order_status_events cannot query order_status_events itself (PostgreSQL reports infinite
+-- recursion); it answers only for the caller's own orders and returns a boolean, never rows.
+CREATE OR REPLACE FUNCTION app.continues_order_timeline(order_id text, from_status text,
+                                                        to_status text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.orders AS o
+        WHERE o.id = order_id
+          AND app.is_tenant_row(o."organizationId", o."userId")
+          AND o.status::text = to_status
+          AND from_status IS NOT DISTINCT FROM (
+              SELECT e."toStatus"::text
+              FROM public.order_status_events AS e
+              WHERE e."orderId" = o.id
+              ORDER BY e."createdAt" DESC, e.id DESC
+              LIMIT 1
+          )
+    )
+$$;
+
 -- Document numbers (TF-SO-2026-000123). TopFlow's NumberingService increments the counter with
 -- INSERT ... ON CONFLICT DO UPDATE on document_sequences, a table every tenant shares; with
 -- that UPDATE privilege one tenant could reset or skip everyone's numbering. The same statement
@@ -137,9 +166,11 @@ END
 $$;
 
 REVOKE ALL ON FUNCTION app.user_id(), app.org_id(), app.context_is_valid(), app.has_trade_access(),
-    app.is_tenant_row(text, text), app.org_role(), app.next_document_number(text) FROM PUBLIC;
+    app.is_tenant_row(text, text), app.org_role(), app.next_document_number(text),
+    app.continues_order_timeline(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.user_id(), app.org_id(), app.context_is_valid(), app.has_trade_access(),
-    app.is_tenant_row(text, text), app.org_role(), app.next_document_number(text) TO topflow_app;
+    app.is_tenant_row(text, text), app.org_role(), app.next_document_number(text),
+    app.continues_order_timeline(text, text, text) TO topflow_app;
 GRANT EXECUTE ON FUNCTION app.next_document_number(text) TO topflow_backoffice;
 
 -- ─── Customer-facing API (topflow_app) ─────────────────────────────────────
@@ -211,6 +242,32 @@ CREATE POLICY order_items_app ON order_items FOR ALL TO topflow_app
 CREATE POLICY order_events_app ON order_status_events FOR ALL TO topflow_app
     USING (EXISTS (SELECT 1 FROM orders AS o WHERE o.id = order_status_events."orderId"))
     WITH CHECK (EXISTS (SELECT 1 FROM orders AS o WHERE o.id = order_status_events."orderId"));
+-- Lines belong to placing an order. TopFlow creates the order with its lines and then records
+-- its first status event, in one transaction (OrdersService.checkout,
+-- OrderWriter.createFromQuotation). A line can therefore be added only to an open, unpaid order
+-- whose timeline has not started: never to a paid, dispatched, delivered or cancelled order,
+-- and never to an order after its first event.
+CREATE POLICY order_items_app_new ON order_items AS RESTRICTIVE FOR INSERT TO topflow_app
+    WITH CHECK (EXISTS (
+        SELECT 1
+        FROM orders AS o
+        WHERE o.id = order_items."orderId"
+          AND o.status IN ('PENDING_PAYMENT', 'CONFIRMED') AND o."paymentStatus" = 'UNPAID'
+          AND o."dispatchedAt" IS NULL AND o."deliveredAt" IS NULL AND o."cancelledAt" IS NULL
+          AND NOT EXISTS (SELECT 1 FROM order_status_events AS e WHERE e."orderId" = o.id)
+    ));
+-- Order history is append-only, and a customer appends only what their own flows write: the
+-- first event of an order they place (it starts waiting for payment or confirmed) and the
+-- cancellation of an open order (orders_app_cancel), in their own name, continuing the order's
+-- timeline and ending in the status the order has. A customer cannot record a status the order
+-- does not have, repeat an event, or write one in someone else's name.
+CREATE POLICY order_events_app_new ON order_status_events AS RESTRICTIVE FOR INSERT TO topflow_app
+    WITH CHECK ("actorId" = app.user_id()
+                AND (("fromStatus" IS NULL AND "toStatus" IN ('PENDING_PAYMENT', 'CONFIRMED'))
+                     OR ("fromStatus" IN ('PENDING_PAYMENT', 'CONFIRMED')
+                         AND "toStatus" = 'CANCELLED'))
+                AND app.continues_order_timeline("orderId", "fromStatus"::text,
+                                                 "toStatus"::text));
 
 CREATE POLICY rfqs_app ON quote_requests FOR ALL TO topflow_app
     USING (app.is_tenant_row("organizationId", "requestedById"))
