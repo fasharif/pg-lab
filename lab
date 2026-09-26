@@ -15,6 +15,8 @@ export LAB_ROOT LAB_ROOT_HOST
 source "$LAB_ROOT/scripts/lib.sh"
 # shellcheck source=scripts/drills.sh
 source "$LAB_ROOT/scripts/drills.sh"
+# shellcheck source=scripts/sqlserver.sh
+source "$LAB_ROOT/scripts/sqlserver.sh"
 
 usage() {
   cat <<'EOF'
@@ -65,10 +67,15 @@ Security
   rls-plans                the tenant's order page under two policy designs
                            (reports/rls-plans.md); leaves the schema tuned
 
+SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
+  sqlserver up|seed [--scale N]|casebook|down
+                           the casebook on SQL Server 2022 Developer edition
+
 Tests
   test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
                            partition functions) and the integration tests; needs seeded data
-  check                    static checks: ruff, mypy, unit tests, definitions, shellcheck
+  check                    static checks: ruff, mypy, unit tests, definitions, sqlfluff,
+                           promtool, shellcheck
 
 Help
   help                     this text
@@ -82,7 +89,8 @@ env_lines() {
     key=${line%%=*}
     value=${line#*=}
     if [ "$value" = "change-me" ]; then
-      value=$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')
+      # "Lab-" adds the upper-case letter and symbol that SQL Server's password policy wants.
+      value="Lab-$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')"
       printf '%s=%s\n' "$key" "$value"
     else
       printf '%s\n' "$line"
@@ -265,6 +273,9 @@ cmd_check() {
   log "ruff, mypy, unit tests and definitions"
   runner bash -c 'ruff format --check src tests && ruff check src tests && mypy \
     && python -m pytest -q -m "not integration" && python -m pglab validate'
+  log "sqlfluff: SQL syntax of the lab's PostgreSQL files and the SQL Server chapter"
+  runner sqlfluff lint --dialect postgres --rules LT12 sql/lab sql/security sql/partitioning
+  runner sqlfluff lint --dialect tsql --rules LT12 sqlserver/sql
   log "promtool: alert rules, their unit tests and the Prometheus configuration"
   # Works on a copy of the repository mount: on Windows, Docker Desktop could not read
   # some nested bind mounts in this lab's folder.
@@ -347,6 +358,7 @@ main() {
     tune) cmd_tune "$@" ;;
     untune) cmd_untune "$@" ;;
     rls-plans) cmd_rls_plans "$@" ;;
+    sqlserver) cmd_sqlserver "$@" ;;
     monitor) cmd_monitor "$@" ;;
     load) cmd_load "$@" ;;
     pitr-drill) pitr_drill "$@" ;;

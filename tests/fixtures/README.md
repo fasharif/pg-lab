@@ -13,3 +13,10 @@ only. The unit tests use them to check plan parsing and the plan checks without 
 
 Metric names exposed by postgres_exporter v0.20.1 against a lab node, used to check that
 every metric referenced by the Grafana dashboard and the Prometheus alert rules exists.
+
+## mssql/sqlcmd-output-synthetic.txt
+
+Hand-written, not captured: SQL Server was not run in this repository (docs/sqlserver.md). It
+follows the documented shape of sqlcmd output with `SET STATISTICS IO ON` and
+`SET STATISTICS XML ON` (a "Table 'x'. Scan count n, logical reads n" line per table and one
+showplan XML document per statement) and exists only to test the parser in `pglab.mssql`.

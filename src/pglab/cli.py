@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import psycopg
 
-from pglab import casebook, drills, heartbeat, indexing, partitioning, rls, workload
+from pglab import casebook, drills, heartbeat, indexing, mssql, partitioning, rls, workload
 from pglab.db import connect
 from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.errors import CheckError, LabError
-from pglab.report import run_info
+from pglab.report import RunInfo, run_info
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD_FILE = ROOT / "workload" / "queries.toml"
@@ -202,33 +203,62 @@ def cmd_drill_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pglab", description=__doc__)
-    parser.add_argument("--label", default=None, help="command shown in report headers")
-    sub = parser.add_subparsers(dest="command", required=True)
+def cmd_mssql_report(args: argparse.Namespace) -> int:
+    expectations = mssql.load_expectations(ROOT / "sqlserver" / "expectations.toml")
+    before = mssql.split_cases(Path(args.before).read_text(encoding="utf-8", errors="replace"))
+    after = mssql.split_cases(Path(args.after).read_text(encoding="utf-8", errors="replace"))
+    info = mssql_run_info(args)
+    _write(Path(args.output), mssql.render(before, after, expectations, info, command=args.label))
+    failed = 0
+    for number, expectation in sorted(expectations.items()):
+        failures = mssql.check(after[number], expectation) if number in after else ["missing"]
+        print(f"case {number} {'pass' if not failures else 'FAIL'} {'; '.join(failures)}")
+        failed += 1 if failures else 0
+    if failed:
+        raise CheckError(f"{failed} SQL Server case(s) failed their plan checks")
+    return 0
 
+
+def mssql_run_info(args: argparse.Namespace) -> RunInfo:
+    return RunInfo(
+        postgres_version="SQL Server 2022 Developer edition (version in the sqlcmd output)",
+        scale=args.scale,
+        anchor="see dbo.lab_settings",
+        environment=os.environ.get("LAB_ENVIRONMENT", "not recorded"),
+        generated_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
+        measured=False,
+        runs=0,
+    )
+
+
+type Subparsers = argparse._SubParsersAction[argparse.ArgumentParser]
+
+
+def _timing_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--measure", action="store_true", help="record median execution times (quiet machine only)"
+    )
+    p.add_argument("--runs", type=int, default=15, help="timed runs per statement (default 15)")
+
+
+def _performance_commands(sub: Subparsers) -> None:
     sub.add_parser("validate", help="check the workload and casebook definitions").set_defaults(
         func=cmd_validate
     )
-
-    def timing_options(p: argparse.ArgumentParser) -> None:
-        p.add_argument(
-            "--measure",
-            action="store_true",
-            help="record median execution times (quiet machine only)",
-        )
-        p.add_argument("--runs", type=int, default=15, help="timed runs per statement (default 15)")
-
     p = sub.add_parser("workload", help="rank the workload statements by buffers touched")
     p.add_argument("--state", choices=("baseline", "tuned", "current"), default="baseline")
     p.add_argument("--output", default=str(REPORTS_DIR / "workload.md"))
-    timing_options(p)
+    _timing_options(p)
     p.set_defaults(func=cmd_workload)
 
     p = sub.add_parser("casebook", help="before/after plans of the casebook cases")
     p.add_argument("--output", default=str(REPORTS_DIR / "casebook.md"))
-    timing_options(p)
+    _timing_options(p)
     p.set_defaults(func=cmd_casebook)
+
+    p = sub.add_parser("casebook-state", help="revert (baseline) or apply (tuned) every fix")
+    p.add_argument("state", choices=("baseline", "tuned"))
+    p.set_defaults(func=cmd_casebook_state)
 
     p = sub.add_parser("index-report", help="index sizes and WAL per inserted row")
     p.add_argument("--output", default=str(REPORTS_DIR / "indexing.md"))
@@ -236,7 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("partition", help="build monthly partitions, check pruning, report")
     p.add_argument("--output", default=str(REPORTS_DIR / "partitioning.md"))
-    timing_options(p)
+    _timing_options(p)
     p.set_defaults(func=cmd_partition)
 
     p = sub.add_parser("partition-maintain", help="create future partitions, detach old ones")
@@ -251,6 +281,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=str(REPORTS_DIR / "rls-plans.md"))
     p.set_defaults(func=cmd_rls_report)
 
+    p = sub.add_parser("mssql-report", help="SQL Server chapter: check plans from sqlcmd output")
+    p.add_argument("--before", required=True)
+    p.add_argument("--after", required=True)
+    p.add_argument("--scale", default=os.environ.get("LAB_SCALE", "unknown"))
+    p.add_argument("--output", default=str(REPORTS_DIR / "sqlserver-casebook.md"))
+    p.set_defaults(func=cmd_mssql_report)
+
+
+def _reliability_commands(sub: Subparsers) -> None:
     p = sub.add_parser("heartbeat", help="client loop writing one row per interval")
     p.add_argument("--run-id", required=True)
     p.add_argument("--hosts", required=True, help="comma-separated node names, e.g. pg1,pg2")
@@ -270,9 +309,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--measure", action="store_true", help="publish the measured durations")
     p.set_defaults(func=cmd_drill_report)
 
-    p = sub.add_parser("casebook-state", help="revert (baseline) or apply (tuned) every fix")
-    p.add_argument("state", choices=("baseline", "tuned"))
-    p.set_defaults(func=cmd_casebook_state)
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pglab", description=__doc__)
+    parser.add_argument("--label", default=None, help="command shown in report headers")
+    sub = parser.add_subparsers(dest="command", required=True)
+    _performance_commands(sub)
+    _reliability_commands(sub)
     return parser
 
 
