@@ -11,7 +11,17 @@ from pathlib import Path
 
 import psycopg
 
-from pglab import casebook, drills, heartbeat, indexing, mssql, partitioning, rls, workload
+from pglab import (
+    casebook,
+    drills,
+    heartbeat,
+    indexing,
+    monitoring,
+    mssql,
+    partitioning,
+    rls,
+    workload,
+)
 from pglab.db import connect
 from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.errors import CheckError, LabError
@@ -20,7 +30,8 @@ from pglab.report import RunInfo, run_info
 ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD_FILE = ROOT / "workload" / "queries.toml"
 CASEBOOK_DIR = ROOT / "casebook"
-REPORTS_DIR = ROOT / "reports"
+# ./lab ci points this at out/reports so that CI runs never rewrite the committed reports.
+REPORTS_DIR = Path(os.environ.get("LAB_REPORTS_DIR") or ROOT / "reports")
 
 
 def _definitions() -> tuple[dict[str, WorkloadQuery], list[Case]]:
@@ -289,6 +300,18 @@ def _performance_commands(sub: Subparsers) -> None:
     p.set_defaults(func=cmd_mssql_report)
 
 
+def cmd_monitor_check(args: argparse.Namespace) -> int:
+    rules = monitoring.expected_rule_count(
+        ROOT / "monitoring" / "prometheus" / "rules" / "postgres.yml"
+    )
+    nodes = [node for node in args.nodes.split(",") if node]
+    monitoring.wait_until_healthy(args.prometheus, args.grafana, nodes, rules, timeout=args.timeout)
+    print(
+        f"monitoring ok: {', '.join(nodes)} scraped, {rules} alert rules loaded, dashboard present"
+    )
+    return 0
+
+
 def _reliability_commands(sub: Subparsers) -> None:
     p = sub.add_parser("heartbeat", help="client loop writing one row per interval")
     p.add_argument("--run-id", required=True)
@@ -301,6 +324,13 @@ def _reliability_commands(sub: Subparsers) -> None:
     sub.add_parser("fingerprint", help="order_items row count and content checksum").set_defaults(
         func=cmd_fingerprint
     )
+
+    p = sub.add_parser("monitor-check", help="exporters scraped, rules loaded, dashboard present")
+    p.add_argument("--nodes", default="pg1,pg2")
+    p.add_argument("--prometheus", default="http://prometheus:9090")
+    p.add_argument("--grafana", default="http://grafana:3000")
+    p.add_argument("--timeout", type=float, default=240.0)
+    p.set_defaults(func=cmd_monitor_check)
 
     p = sub.add_parser("drill-report", help="check a drill's outcome and write its report")
     p.add_argument("drill", choices=("pitr", "switchover"))

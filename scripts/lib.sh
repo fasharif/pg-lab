@@ -102,7 +102,7 @@ pglab() {
   local label=${1% }
   shift
   compose exec -T -e LAB_ENVIRONMENT="$(lab_environment)" -e PGHOST="$(primary_host)" -e PGPORT=5432 \
-    runner python -m pglab --label "$label" "$@"
+    -e LAB_REPORTS_DIR="${LAB_REPORTS_DIR:-}" runner python -m pglab --label "$label" "$@"
 }
 
 # psql as the postgres superuser inside a node container (Unix socket, peer authentication).

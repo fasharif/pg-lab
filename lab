@@ -58,7 +58,7 @@ Reliability
                            (reports/switchover-drill.md); run it twice to switch back
 
 Monitoring
-  monitor up|down          postgres_exporter per node, Prometheus (alert rules) and Grafana
+  monitor up|check|down    postgres_exporter per node, Prometheus (alert rules) and Grafana
                            (provisioned dashboard) on 127.0.0.1:55430
   load [--seconds N] [--clients N]
                            pgbench with TopFlow back-office traffic (default 120 s, 4 clients)
@@ -70,6 +70,11 @@ Security
 SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
   sqlserver up|seed [--scale N]|casebook|down
                            the casebook on SQL Server 2022 Developer edition
+
+CI
+  ci                       the whole lab at SCALE=LAB_SCALE, as GitHub Actions runs it: up, seed,
+                           casebook, partitions, tests, PITR drill, replica, switchover there
+                           and back, tests again, monitoring (reports go to out/reports)
 
 Tests
   test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
@@ -231,10 +236,18 @@ cmd_monitor() {
       info "Grafana:    http://127.0.0.1:$(env_value LAB_GRAFANA_PORT 55430)/d/pglab-postgres (anonymous read-only)"
       info "Prometheus: http://127.0.0.1:$(env_value LAB_PROMETHEUS_PORT 55490)/alerts"
       ;;
+    check)
+      local nodes=() node
+      for node in "${LAB_NODES[@]}"; do is_running "$node" && nodes+=("$node"); done
+      pglab "./lab monitor check" monitor-check --nodes "$(
+        IFS=,
+        echo "${nodes[*]}"
+      )"
+      ;;
     down)
       compose --profile monitoring rm -sf "${MONITORING_SERVICES[@]}"
       ;;
-    *) die "monitor: expected up or down" ;;
+    *) die "monitor: expected up, check or down" ;;
   esac
 }
 
@@ -256,6 +269,30 @@ cmd_load() {
   compose exec -T -u postgres -e PGPASSWORD="$(env_value LAB_BACKOFFICE_PASSWORD)" "$primary" \
     pgbench --host=127.0.0.1 --username=topflow_backoffice --no-vacuum --progress=30 \
     --time="$seconds" --client="$clients" --jobs=2 --file=/tmp/pgbench.sql topflow
+}
+
+cmd_ci() {
+  require_env
+  export LAB_REPORTS_DIR=/work/out/reports
+  local started
+  started=$(now_s)
+  cmd_up
+  cmd_seed "$@"
+  cmd_casebook
+  cmd_partition
+  cmd_partition_maintain --ahead 4 --retain 12
+  cmd_test
+  cmd_rls_plans
+  pitr_drill
+  replica_up
+  switchover
+  unset LAB_PRIMARY_HOST
+  switchover
+  unset LAB_PRIMARY_HOST
+  cmd_test
+  cmd_monitor up
+  cmd_monitor check
+  log "the CI sequence passed in $(elapsed "$started" "$(now_s)") s (reports in out/reports)"
 }
 
 cmd_test() {
@@ -364,6 +401,7 @@ main() {
     pitr-drill) pitr_drill "$@" ;;
     replica) cmd_replica "$@" ;;
     switchover) switchover "$@" ;;
+    ci) cmd_ci "$@" ;;
     test) cmd_test "$@" ;;
     check) cmd_check "$@" ;;
     status) cmd_status "$@" ;;
