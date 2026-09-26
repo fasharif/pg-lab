@@ -6,8 +6,8 @@
 --
 -- The functions are deliberately not STRICT: PostgreSQL only inlines a STRICT SQL function
 -- when its body is strict too, and CASE is not. Inlined, they cost about as much as the
--- expressions they contain; called through the SQL-function executor, the generator was
--- several times slower.
+-- expressions they contain; otherwise each row pays for a call through the SQL-function
+-- executor (EXPLAIN VERBOSE shows the difference).
 
 -- Row counts for a SCALE (the approximate number of order lines).
 CREATE OR REPLACE FUNCTION lab.dataset_size(scale bigint)

@@ -44,15 +44,17 @@ raw SQL migrations, which the casebook notes case by case.
 
 ## 4. A data generator in SQL, with hash-based values
 
-**Context.** The target is 10 million order lines (50 million as an option) and CI needs about
-100,000 in seconds. Rows must be reproducible so that plans can be compared between runs.
+**Context.** The target is 10 million order lines (50 million as an option), and CI loads about
+100,000 on every run, so loading must not dominate the pipeline. Rows must be reproducible so
+that plans can be compared between runs.
 
 **Decision.** `generate_series` and pure SQL functions of the row number: `hashint8extended` for
 pseudo-random numbers, `md5` for UUID-shaped ids. Order totals are computed from the same line
 function that fills `order_items`, so headers always match their lines. Secondary indexes and
-foreign keys are dropped for the load and rebuilt afterwards; the functions are not `STRICT`,
-because PostgreSQL does not inline a strict SQL function whose body contains `CASE`, and inlining
-made the generator several times faster.
+foreign keys are dropped for the load and rebuilt afterwards. The functions are not `STRICT`,
+because PostgreSQL does not inline a strict SQL function whose body contains `CASE` and would
+call it through the SQL-function executor for every row (`EXPLAIN VERBOSE` shows the call).
+How long the load takes at the target size is part of the measured run.
 
 **Consequences.** The data never leaves the server and there is no Python dependency for loading.
 The same SCALE and anchor give the same rows. Names, companies and brands are fictional and all
@@ -125,20 +127,30 @@ does not test it, and a proxy or a DNS switch is the usual way to repoint such c
 (docs/replication.md). There is no automatic failover: Patroni or a similar manager would add
 consensus and fencing, which is out of scope here.
 
-## 10. Row-level security: inline settings plus a restrictive membership gate
+## 10. Row-level security: an opaque tenant-row function plus a restrictive membership gate
 
 **Context.** Tenant isolation must hold even when an API query forgets its `WHERE`, and it must
-not cost the tenant queries their indexes.
+not cost the tenant queries their indexes. The API's queries already filter by organisation, so
+every policy repeats a predicate the planner has already seen once.
 
-**Decision.** Permissive policies compare columns with `app.org_id()` and `app.user_id()`, plain
-SQL functions over `current_setting` that PostgreSQL inlines. A restrictive policy checks once
-per statement (an InitPlan) that the user belongs to the organisation they claim. Staff use a
-separate role, `topflow_backoffice`, with its own pool.
+**Decision.** On the tables where a row belongs to an organisation or to a customer without one,
+the permissive policy calls `app.is_tenant_row(organisation, owner)`, a PL/pgSQL function
+(`STABLE`, `COST 10`) over `current_setting`. A restrictive policy checks once per statement
+(an InitPlan) that the user belongs to the organisation they claim. Case 8's index includes
+`userId`, the policy's second column. Staff use a separate role, `topflow_backoffice`, with its
+own pool.
 
-**Consequences.** A forged organisation id sees nothing. The first design, with the membership
-lookup inside the permissive policy, made the planner lose the organisation's order page index;
-`reports/rls-plans.md` shows both plans. Sign-up, accepting an invitation and KYC cross tenants
-and belong to the staff role in this model.
+**Alternatives.** The membership lookup inside the permissive policy (the first version) made the
+planner expect 27 of 9,943 rows and read every order of the organisation for one page. A
+transparent policy with inlined settings kept the index, but the planner applied the
+organisation's share twice and expected 275 rows; the bitmap plan cost only 15% more than the
+index scan.
+
+**Consequences.** A forged organisation id sees nothing. The function gets a fixed default
+selectivity, so the estimate is a sixth of the real rows for every organisation: wrong, but
+predictably so, and the bitmap plan costs 77 times the index scan (`reports/rls-plans.md`). A
+function call per row costs CPU, which this functional run did not measure. Sign-up, accepting
+an invitation and KYC cross tenants and belong to the staff role in this model.
 
 ## 11. Partitioning shown next to the plain tables, not in place of them
 

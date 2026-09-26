@@ -30,7 +30,7 @@ SELECT count(*) FROM orders AS o
 WHERE o."organizationId" = %(org_id)s
 """
 # The best plan without index scans must cost at least this many times the chosen one. The lab's
-# policies give about 77 at SCALE=1000000; a transparent policy gives 1.1 (reports/rls-plans.md).
+# policies give about 77 at SCALE=1000000; a transparent policy gives 1.2 (reports/rls-plans.md).
 MIN_COST_FACTOR = 2.0
 
 
