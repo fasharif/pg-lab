@@ -2,10 +2,14 @@
 
 Write cost is measured as WAL generated per inserted row, from EXPLAIN (ANALYZE, WAL) on a
 batch INSERT, with the schema in its baseline state (TopFlow's indexes) and in its tuned state
-(plus the casebook's indexes). WAL volume depends on the rows and indexes, not on machine load,
-so it can be compared across runs. Each probe starts right after a CHECKPOINT, so it includes
-the full-page images that the first change to a page after every checkpoint also writes in
-production. The probe rows are deleted afterwards.
+(plus the casebook's indexes). WAL volume depends on the rows and indexes, not on machine load.
+
+Each probe starts right after a CHECKPOINT, so it includes the full-page images that the first
+change to a page after every checkpoint also writes in production; they are most of the volume
+for indexes with random keys. The INSERT runs in a transaction that is rolled back, so every
+probe appends to the heap in the same way (a DELETE and VACUUM between probes let the next one
+reuse freed pages or not, which changed the result by a factor of two). Each probe runs
+PROBE_REPEATS times and the median is reported; the table is vacuumed afterwards.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from pglab.explain import parse_plan
 from pglab.report import RunInfo, table
 
 PROBE_ROWS = 5000
+PROBE_REPEATS = 3
 PROBE_PREFIX = "walprobe-"
 CREATE_INDEX = re.compile(
     r'CREATE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?', re.IGNORECASE
@@ -123,22 +128,26 @@ def table_sizes(conn: Connection) -> dict[str, tuple[int, int]]:
 
 
 def probe_wal(conn: Connection, table_name: str) -> WalProbe:
-    """Insert PROBE_ROWS rows right after a checkpoint, read the WAL figures, remove the rows."""
+    """Median WAL of PROBE_REPEATS rolled-back inserts of PROBE_ROWS rows, each after a
+    CHECKPOINT."""
     statement = PROBES[table_name]
-    conn.execute("CHECKPOINT")
-    rows = explain_raw(conn, statement, "ANALYZE, WAL, TIMING OFF, SUMMARY OFF, FORMAT JSON")
-    plan = parse_plan(rows[0][0])
-    raw = plan.root.raw
-    conn.execute(f"DELETE FROM {table_name} WHERE id LIKE '{PROBE_PREFIX}%'")
+    samples: list[tuple[int, int]] = []
+    for _ in range(PROBE_REPEATS):
+        conn.execute("CHECKPOINT")
+        with conn.transaction(force_rollback=True):
+            rows = explain_raw(
+                conn, statement, "ANALYZE, WAL, TIMING OFF, SUMMARY OFF, FORMAT JSON"
+            )
+        raw = parse_plan(rows[0][0]).root.raw
+        samples.append((int(raw.get("WAL Bytes", 0)), int(raw.get("WAL FPI", 0))))
     conn.execute(f"VACUUM {table_name}")
     count = scalar(
         conn,
         "SELECT count(*) FROM pg_index WHERE indrelid = %s::regclass",
         (table_name,),
     )
-    return WalProbe(
-        table_name, int(count), int(raw.get("WAL Bytes", 0)), int(raw.get("WAL FPI", 0))
-    )
+    wal_bytes, wal_fpi = sorted(samples)[len(samples) // 2]
+    return WalProbe(table_name, int(count), wal_bytes, wal_fpi)
 
 
 def measure_alternative(conn: Connection, name: str, definition: str) -> int:
@@ -150,37 +159,46 @@ def measure_alternative(conn: Connection, name: str, definition: str) -> int:
     return size
 
 
+ALTERNATIVES = (
+    (
+        "BRIN on orders.createdAt (instead of the covering B-tree of case 7)",
+        "lab_orders_createdAt_brin",
+        'CREATE INDEX "lab_orders_createdAt_brin" ON orders USING brin ("createdAt")',
+        "orders_createdAt_idx",
+    ),
+    (
+        "BRIN on audit_logs.createdAt (instead of TopFlow's B-tree)",
+        "lab_audit_createdAt_brin",
+        'CREATE INDEX "lab_audit_createdAt_brin" ON audit_logs USING brin ("createdAt")',
+        "audit_logs_createdAt_idx",
+    ),
+    (
+        "Case 8 without INCLUDE (userId), which row-level security needs (docs/security.md)",
+        "lab_orders_org_created_plain",
+        'CREATE INDEX "lab_orders_org_created_plain" ON orders ("organizationId", "createdAt")',
+        "orders_organizationId_createdAt_idx",
+    ),
+)
+
+
 def build_report(conn: Connection, cases: Sequence[Case]) -> IndexReport:
+    """Sizes first, on freshly built indexes; then the WAL probes, which leave (vacuumed)
+    entries behind in the indexes they touch. Leaves the schema tuned."""
+    casebook.revert_all(conn, cases)
+    casebook.apply_all(conn, cases)
+    conn.execute("VACUUM (ANALYZE) orders, audit_logs")
+    indexes = list_indexes(conn, index_origins(cases))
+    sizes = {row.name: row.size_bytes for row in indexes}
+    tables = table_sizes(conn)
+    alternatives = [
+        (label, definition, measure_alternative(conn, name, definition), sizes.get(replaced, 0))
+        for label, name, definition, replaced in ALTERNATIVES
+    ]
     casebook.revert_all(conn, cases)
     baseline = {name: probe_wal(conn, name) for name in PROBES}
     casebook.apply_all(conn, cases)
     tuned = {name: probe_wal(conn, name) for name in PROBES}
-    conn.execute("VACUUM (ANALYZE) orders, audit_logs")
-    indexes = list_indexes(conn, index_origins(cases))
-    sizes = {row.name: row.size_bytes for row in indexes}
-    alternatives = [
-        (
-            "BRIN on orders.createdAt (instead of the covering B-tree of case 7)",
-            'CREATE INDEX "lab_orders_createdAt_brin" ON orders USING brin ("createdAt")',
-            measure_alternative(
-                conn,
-                "lab_orders_createdAt_brin",
-                'CREATE INDEX "lab_orders_createdAt_brin" ON orders USING brin ("createdAt")',
-            ),
-            sizes.get("orders_createdAt_idx", 0),
-        ),
-        (
-            "BRIN on audit_logs.createdAt (instead of TopFlow's B-tree)",
-            'CREATE INDEX "lab_audit_createdAt_brin" ON audit_logs USING brin ("createdAt")',
-            measure_alternative(
-                conn,
-                "lab_audit_createdAt_brin",
-                'CREATE INDEX "lab_audit_createdAt_brin" ON audit_logs USING brin ("createdAt")',
-            ),
-            sizes.get("audit_logs_createdAt_idx", 0),
-        ),
-    ]
-    return IndexReport(indexes, table_sizes(conn), baseline, tuned, alternatives)
+    return IndexReport(indexes, tables, baseline, tuned, alternatives)
 
 
 def human_bytes(value: float) -> str:
@@ -203,8 +221,8 @@ def render_report(report: IndexReport, info: RunInfo, *, command: str) -> str:
         "# Index sizes and write cost",
         "",
         "Measured sizes of every index on the TopFlow tables after the casebook fixes, the WAL",
-        "each inserted row costs before and after them, and two alternatives that were measured",
-        "but not adopted. `docs/indexing.md` explains the choices.",
+        "each inserted row costs before and after them, and alternatives that were measured but",
+        "not adopted. `docs/indexing.md` explains the choices.",
         "",
         *info.header_lines(command),
         "",
@@ -243,15 +261,22 @@ def render_report(report: IndexReport, info: RunInfo, *, command: str) -> str:
             "lrrr",
         ),
         "",
-        f"## Write cost: WAL per inserted row ({PROBE_ROWS:,} rows per probe)",
+        "## Write cost: WAL per inserted row",
+        "",
+        f"Median of {PROBE_REPEATS} probes of {PROBE_ROWS:,} inserted rows, each right after a",
+        "`CHECKPOINT` and rolled back, measured with `EXPLAIN (ANALYZE, WAL)`. FPI counts the",
+        "full-page images: the whole page is logged (compressed, `wal_compression = zstd`) on its",
+        "first change after a checkpoint, which indexes with scattered keys cause for most rows.",
         "",
         table(
             [
                 "Table",
                 "Indexes before",
                 "WAL per row before",
+                "FPI before",
                 "Indexes after",
                 "WAL per row after",
+                "FPI after",
                 "Change",
             ],
             [
@@ -259,13 +284,15 @@ def render_report(report: IndexReport, info: RunInfo, *, command: str) -> str:
                     name,
                     report.baseline[name].index_count,
                     f"{report.baseline[name].bytes_per_row:,.0f} B",
+                    f"{report.baseline[name].wal_fpi:,}",
                     report.tuned[name].index_count,
                     f"{report.tuned[name].bytes_per_row:,.0f} B",
+                    f"{report.tuned[name].wal_fpi:,}",
                     _change(report.baseline[name], report.tuned[name]),
                 )
                 for name in PROBES
             ],
-            "lrrrrr",
+            "lrrrrrrr",
         ),
         "",
         "## Alternatives measured, not adopted",
