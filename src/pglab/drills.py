@@ -1,9 +1,9 @@
-"""Analysis and reports of the reliability drills: point-in-time recovery and planned
-switchover.
+"""Analysis and reports of the reliability drills: point-in-time recovery, planned switchover
+and unplanned failover.
 
 The drill functions in scripts/drills.sh drive Docker and record what they did in a facts file
 (KEY=value lines) next to the heartbeat log. This module checks the outcome and renders the
-report. The PITR analysis is a pure function of the facts, the heartbeat log and a
+report. The PITR and failover analyses are pure functions of the facts, the heartbeat log and a
 few values read from the database by the caller, so they are unit-tested without a server.
 Correctness checks (row counts, checksums, acknowledged writes) are always reported; durations
 (RTO, data-loss window, write downtime) are shown only for measured runs.
@@ -374,6 +374,83 @@ def analyse_switchover(
     ]
     if gap and measured:
         result.notes.append(f"{gap.failed_between} write attempts failed during the longest gap.")
+    return result
+
+
+@dataclass(frozen=True)
+class FailoverState:
+    """What the nodes hold after the failover drill, read by the caller."""
+
+    primary: str  # cluster_name of the node that accepts writes
+    rows_on_primary: frozenset[int]  # this run's heartbeat seqs on the new primary
+    rows_on_rejoined: frozenset[int]  # the same, read on the rejoined old primary
+    rewind_role_is_superuser: bool
+
+
+def analyse_failover(facts: dict[str, str], state: FailoverState) -> DrillResult:
+    old, new = fact(facts, "OLD_PRIMARY"), fact(facts, "NEW_PRIMARY")
+    lost = int(fact(facts, "LOST_ROWS"))
+    new_seq = int(fact(facts, "NEW_SEQ"))
+    lost_seqs = frozenset(range(1, lost + 1))
+    diverged = facts.get("REWIND_DIVERGED", "")
+    summary = facts.get("REWIND_SUMMARY", "")
+    role = facts.get("REWIND_ROLE", "?")
+    on_new = len(lost_seqs & state.rows_on_primary)
+    on_old = len(lost_seqs & state.rows_on_rejoined)
+    result = DrillResult("Unplanned failover drill: divergence and pg_rewind")
+    result.checks = [
+        Check(
+            f"{new} was promoted and accepts writes",
+            state.primary == new,
+            f"writes now go to {state.primary}",
+        ),
+        Check(
+            f"the {lost} rows {old} accepted after the promotion are not on {new}",
+            lost > 0 and on_new == 0,
+            f"{on_new} of {lost} found on {new}",
+        ),
+        Check(
+            f"pg_rewind found the divergence and rewound {old}",
+            bool(diverged) and "no rewind required" not in summary,
+            f"{diverged}; {summary}" if diverged else summary or "no pg_rewind output",
+        ),
+        Check(
+            "pg_rewind connected as a role that is not a superuser",
+            role == "rewind" and not state.rewind_role_is_superuser,
+            f"role {role}",
+        ),
+        Check(
+            f"{old} streams from {new} again",
+            facts.get("STANDBY_STATE") == "streaming",
+            f"pg_stat_replication state: {facts.get('STANDBY_STATE', 'none')}",
+        ),
+        Check(
+            f"{old} now has {new}'s write and none of its own lost rows",
+            new_seq in state.rows_on_rejoined and on_old == 0,
+            f"{new}'s write {'present' if new_seq in state.rows_on_rejoined else 'missing'}, "
+            f"{on_old} of {lost} lost rows left",
+        ),
+    ]
+    result.facts_table = [
+        ("Old primary", old),
+        ("New primary", new),
+        (
+            "Promotion",
+            f"`pg_promote()` on {new} while {old} kept accepting writes (no fencing): two "
+            "primaries on diverging timelines",
+        ),
+        ("Lost transaction", f"{lost} rows written on {old} after the promotion"),
+        ("Write on the new primary", f"one row (seq {new_seq}) written on {new}"),
+        ("pg_rewind", f"`pg_rewind --source-server='host={new} user={role}'` on {old}"),
+        ("Rejoin", f"standby.signal, primary_conninfo and a slot on {new}; streaming again"),
+    ]
+    result.notes = [
+        "The rows the old primary accepted after the promotion are gone for good: pg_rewind "
+        "replaces its diverged pages with the new primary's. In a real failover the same "
+        "happens to every write that reaches the old primary once the standby is promoted, "
+        "which is why the old primary must be fenced (stopped, or cut off from clients) before "
+        "the promotion. The planned switchover drill stops it first and loses nothing.",
+    ]
     return result
 
 

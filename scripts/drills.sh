@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reliability drills: streaming replica, point-in-time recovery and planned switchover.
+# Reliability drills: streaming replica, point-in-time recovery, planned switchover and
+# unplanned failover.
 # Sourced by ./lab (needs scripts/lib.sh); every step runs through docker compose.
 # shellcheck disable=SC2034  # facts are read by the Python analysis
 
@@ -205,6 +206,24 @@ pitr_drill() {
   pglab "./lab pitr-drill ${measure[*]}" drill-report pitr --dir "/work/$DRILL_DIR" "${measure[@]}"
 }
 
+# Restarts a stopped former primary (already rewound) as a streaming standby of $2.
+rejoin_as_standby() {
+  local node=$1 primary=$2
+  offline "$node" bash -c "
+    set -e
+    touch '$PGDATA_PATH/standby.signal'
+    sed -i -e '/^primary_conninfo/d' -e '/^primary_slot_name/d' '$PGDATA_PATH/postgresql.auto.conf'
+    printf \"primary_conninfo = 'host=%s port=5432 user=replicator application_name=%s'\nprimary_slot_name = '%s'\n\" \
+      '$primary' '$node' '$node' >>'$PGDATA_PATH/postgresql.auto.conf'"
+  compose start "$node" >/dev/null
+  wait_ready "$node" 300
+  # The slot $node kept for $primary when it was the primary would now hold WAL for nothing.
+  node_psql "$node" -c "SELECT pg_drop_replication_slot('$primary')
+                        WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '$primary')" >/dev/null
+  wait_until "$node streams from $primary" 120 "$primary" \
+    "SELECT EXISTS (SELECT 1 FROM pg_stat_replication WHERE application_name = '$node' AND state = 'streaming')"
+}
+
 # ─── Planned switchover drill ──────────────────────────────────────────────
 switchover() {
   require_env
@@ -256,23 +275,69 @@ switchover() {
   record REWIND_SUMMARY "$(printf '%s' "$rewind" | tail -n 1 | tr -d '\r')"
 
   log "5/6 restart $old as a standby of $new"
-  offline "$old" bash -c "
-    set -e
-    touch '$PGDATA_PATH/standby.signal'
-    sed -i -e '/^primary_conninfo/d' -e '/^primary_slot_name/d' '$PGDATA_PATH/postgresql.auto.conf'
-    printf \"primary_conninfo = 'host=%s port=5432 user=replicator application_name=%s'\nprimary_slot_name = '%s'\n\" \
-      '$new' '$old' '$old' >>'$PGDATA_PATH/postgresql.auto.conf'"
-  compose start "$old" >/dev/null
-  wait_ready "$old" 300
-  # The slot $old kept for $new when it was the primary would now hold WAL for nothing.
-  node_psql "$old" -c "SELECT pg_drop_replication_slot('$new')
-                       WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '$new')" >/dev/null
-  wait_until "$old streams from $new" 120 "$new" \
-    "SELECT EXISTS (SELECT 1 FROM pg_stat_replication WHERE application_name = '$old' AND state = 'streaming')"
+  rejoin_as_standby "$old" "$new"
   record STANDBY_STATE streaming
 
   log "6/6 stop the client and verify"
   sleep 2
   heartbeat_stop
   pglab "./lab switchover ${measure[*]}" drill-report switchover --dir "/work/$DRILL_DIR" "${measure[@]}"
+}
+
+# ─── Unplanned failover drill ──────────────────────────────────────────────
+# The standby is promoted while the primary still accepts writes (a failover without fencing),
+# the old primary commits a transaction the new timeline never sees, and pg_rewind, connected as
+# the non-superuser role rewind, has real work to do before the old primary can follow.
+FAILOVER_LOST_ROWS=500
+FAILOVER_NEW_SEQ=1000000
+
+failover_drill() {
+  require_env
+  ensure_runner
+  local old new state rewind diverged
+  [ $# -eq 0 ] || die "failover-drill: unknown option $1"
+  old=$(current_primary) || die "no primary is running (./lab up)"
+  new=$(other_node "$old")
+  is_running "$new" || die "there is no standby to fail over to (./lab replica up)"
+  state=$(node_query "$old" "SELECT state FROM pg_stat_replication WHERE application_name = '$new'")
+  [ "$state" = streaming ] || die "$new is not streaming from $old (state: ${state:-none})"
+
+  drill_start failover
+  record OLD_PRIMARY "$old"
+  record NEW_PRIMARY "$new"
+  record REWIND_ROLE rewind
+  record LOST_ROWS "$FAILOVER_LOST_ROWS"
+  record NEW_SEQ "$FAILOVER_NEW_SEQ"
+
+  log "1/6 promote $new while $old keeps running (no fencing: two primaries)"
+  node_psql "$new" -c 'SELECT pg_promote(wait => true, wait_seconds => 60)' >/dev/null
+  LAB_PRIMARY_HOST=$new
+
+  log "2/6 $old commits $FAILOVER_LOST_ROWS rows that $new never receives; $new takes one write"
+  node_psql "$old" -c "INSERT INTO lab.heartbeat (run_id, seq, sent_at)
+                       SELECT '$DRILL_ID', g, now() FROM generate_series(1, $FAILOVER_LOST_ROWS) AS g" >/dev/null
+  node_psql "$new" -c "INSERT INTO lab.heartbeat (run_id, seq, sent_at)
+                       VALUES ('$DRILL_ID', $FAILOVER_NEW_SEQ, now())" >/dev/null
+
+  log "3/6 stop $old: the fencing that should have come before the promotion"
+  compose stop -t 60 "$old" >/dev/null
+  ensure_slot "$new" "$old"
+
+  log "4/6 pg_rewind $old against $new as the non-superuser role rewind"
+  rewind=$(offline "$old" pg_rewind --target-pgdata="$PGDATA_PATH" \
+    --source-server="host=$new port=5432 user=rewind dbname=postgres" 2>&1) ||
+    die "pg_rewind failed: $rewind"
+  printf '%s\n' "$rewind" | sed 's/^/    /' >&2
+  diverged=$(printf '%s\n' "$rewind" | grep -m 1 'servers diverged at' | sed 's/^pg_rewind: //' | tr -d '\r' || true)
+  record REWIND_DIVERGED "$diverged"
+  record REWIND_SUMMARY "$(printf '%s' "$rewind" | tail -n 1 | tr -d '\r')"
+
+  log "5/6 restart $old as a standby of $new"
+  rejoin_as_standby "$old" "$new"
+  record STANDBY_STATE streaming
+  wait_until "$old has replayed the write made on $new" 120 "$old" \
+    "SELECT EXISTS (SELECT 1 FROM lab.heartbeat WHERE run_id = '$DRILL_ID' AND seq = $FAILOVER_NEW_SEQ)"
+
+  log "6/6 verify"
+  pglab "./lab failover-drill" drill-report failover --dir "/work/$DRILL_DIR"
 }

@@ -1,8 +1,9 @@
-# Replication and the planned switchover
+# Replication, the planned switchover and the unplanned failover
 
 Files: `docker/postgres/lab-entrypoint.sh` (clone on first start), `scripts/drills.sh`
-(`replica_up`, `switchover`), `src/pglab/heartbeat.py` (client loop), `src/pglab/drills.py`
-(analysis). Report: `reports/switchover-drill.md`.
+(`replica_up`, `switchover`, `failover_drill`), `src/pglab/heartbeat.py` (client loop),
+`src/pglab/drills.py` (analysis). Reports: `reports/switchover-drill.md`,
+`reports/failover-drill.md`.
 
 ## The standby
 
@@ -20,13 +21,15 @@ Replication is asynchronous. The standby also has pgBackRest's `restore_command`
 up from the archive if it falls behind the slot. `hot_standby_feedback` is on, which avoids query
 cancellations on the standby at the cost of some bloat on the primary.
 
-The feedback also showed up in a measurement. In one run of `./lab partition` with a standby
-attached, the partitions copied and vacuumed a moment earlier were not marked all-visible: the
-index-only scans made 1,370 and 1,918 heap fetches, and the 30-day revenue statement read 449
-buffers instead of 67. Without a standby the same statements made no heap fetches. The likely
-cause is the standby's reported `xmin`, held in its replication slot, which keeps rows that
-recent from counting as visible to everyone until the next feedback message. The lab's reports
-are therefore generated before a standby is attached, as `./lab ci` orders them.
+The feedback also showed up while the lab was being built. In a run of `./lab partition` with a
+standby attached, the partitions copied and vacuumed a moment earlier were not marked
+all-visible: the index-only scans made heap fetches and read more buffers than in the same run
+without a standby, which made none. The likely cause is the standby's reported `xmin`, held in
+its replication slot, which keeps rows that recent from counting as visible to everyone until
+the next feedback message. That run's output was not kept; to see the effect, run
+`./lab replica up` and then `./lab partition`, and compare the `Heap Fetches` lines with
+`reports/partitioning.md`. The lab's reports are therefore generated before a standby is
+attached, as `./lab ci` orders them.
 
 ## The switchover drill
 
@@ -64,8 +67,41 @@ The checks in the report:
 In a planned switchover like this, pg_rewind reports `no rewind required`: the old primary
 stopped cleanly and the standby replayed everything, so the timelines diverge only after the old
 primary's last record. The step is kept because the same runbook must also work after a failover,
-where the old primary may have written WAL that the new timeline does not contain; that case is
-not exercised by the lab (see the roadmap in the README).
+where the old primary may have written WAL that the new timeline does not contain. The failover
+drill below is that case.
+
+## The unplanned failover drill
+
+`./lab failover-drill` rehearses a failover without fencing: the standby is promoted while the
+primary is still running and accepting writes, as happens when a failover is triggered by a
+network partition or a monitoring mistake rather than a dead primary.
+
+| Step | What happens |
+| --- | --- |
+| 1 | `pg_promote()` on the standby while the old primary keeps running: two primaries on diverging timelines |
+| 2 | The old primary commits a transaction of 500 rows that the new primary never receives; the new primary takes one write of its own |
+| 3 | Stop the old primary (the fencing that should have come before step 1) |
+| 4 | `pg_rewind` the old primary against the new one, connected as `rewind` |
+| 5 | Restart it as a standby of the new primary (the same steps as the switchover) |
+| 6 | Check and write the report |
+
+The checks:
+
+- the promoted node accepts writes;
+- none of the 500 rows is on the new primary;
+- pg_rewind found the divergence (`servers diverged at WAL location ...`) and rewound the old
+  primary, rather than reporting `no rewind required`;
+- the role pg_rewind connected as is not a superuser: `rewind` has `EXECUTE` on
+  `pg_ls_dir`, `pg_stat_file` and the two `pg_read_binary_file` functions, as the pg_rewind
+  documentation lists, and nothing else. This drill is where those grants are exercised;
+- the old primary streams from the new one again, has the new primary's write and none of the
+  500 rows.
+
+The 500 rows are gone for good. That is the lesson of the drill: once a standby is promoted,
+every write the old primary accepts is lost when it is rewound, so a failover must first make
+sure the old primary cannot accept writes (stop it, or cut it off from clients). The planned
+switchover stops it first and loses nothing. Automatic failover managers such as Patroni do the
+fencing with a lock held in a consensus store; the lab has none (see the roadmap).
 
 ## Measured values
 

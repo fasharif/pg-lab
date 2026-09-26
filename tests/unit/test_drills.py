@@ -13,7 +13,9 @@ import pytest
 from pglab.drills import (
     Check,
     DrillResult,
+    FailoverState,
     Recovered,
+    analyse_failover,
     analyse_pitr,
     load_attempts,
     load_facts,
@@ -284,3 +286,49 @@ def test_pitr_fails_when_a_write_before_the_target_is_missing_or_one_after_is_re
     )
     assert not wrong_content.passed
     assert all(value is None for _, value in wrong_content.timings)
+
+
+FAILOVER_FACTS = {
+    "OLD_PRIMARY": "pg1",
+    "NEW_PRIMARY": "pg2",
+    "LOST_ROWS": "3",
+    "NEW_SEQ": "1000000",
+    "REWIND_ROLE": "rewind",
+    "REWIND_DIVERGED": "servers diverged at WAL location 0/5000060 on timeline 4",
+    "REWIND_SUMMARY": "pg_rewind: Done!",
+    "STANDBY_STATE": "streaming",
+}
+
+
+def test_failover_passes_when_the_lost_rows_are_gone_everywhere() -> None:
+    state = FailoverState("pg2", frozenset({1_000_000}), frozenset({1_000_000}), False)
+    result = analyse_failover(FAILOVER_FACTS, state)
+    assert result.passed, [c for c in result.checks if not c.passed]
+    assert result.timings == []
+    assert "## Timings" not in render(result, info(), command="./lab failover-drill")
+
+
+def test_failover_fails_without_a_real_rewind_or_with_lost_rows_left() -> None:
+    state = FailoverState("pg2", frozenset({1_000_000}), frozenset({1_000_000}), False)
+    no_work = analyse_failover(
+        {
+            **FAILOVER_FACTS,
+            "REWIND_DIVERGED": "",
+            "REWIND_SUMMARY": "pg_rewind: no rewind required",
+        },
+        state,
+    )
+    assert [c.description for c in no_work.checks if not c.passed] == [
+        "pg_rewind found the divergence and rewound pg1"
+    ]
+    leftover = analyse_failover(
+        FAILOVER_FACTS,
+        FailoverState("pg2", frozenset({1_000_000}), frozenset({2, 1_000_000}), False),
+    )
+    assert not leftover.passed
+    superuser = analyse_failover(
+        FAILOVER_FACTS, FailoverState("pg2", frozenset(), frozenset(), True)
+    )
+    assert "pg_rewind connected as a role that is not a superuser" in [
+        c.description for c in superuser.checks if not c.passed
+    ]

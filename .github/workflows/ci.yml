@@ -63,7 +63,7 @@ jobs:
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
 
   lab:
-    name: Lab at small scale (schema, data, casebook, partitions, RLS, PITR, switchover, monitoring)
+    name: Lab at small scale (schema, data, casebook, partitions, RLS, PITR, switchover, failover, monitoring)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:

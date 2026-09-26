@@ -22,7 +22,7 @@ from pglab import (
     rls,
     workload,
 )
-from pglab.db import connect
+from pglab.db import Connection, connect, scalar
 from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.errors import CheckError, LabError
 from pglab.report import RunInfo, run_info
@@ -199,6 +199,22 @@ def cmd_fingerprint(_: argparse.Namespace) -> int:
     return 0
 
 
+def _failover_state(conn: Connection, facts: dict[str, str]) -> drills.FailoverState:
+    run_id = drills.fact(facts, "RUN_ID")
+    role = facts.get("REWIND_ROLE", "rewind")
+    superuser = scalar(conn, "SELECT rolsuper FROM pg_roles WHERE rolname = %s", (role,))
+    # The rejoined old primary is a standby now: read it directly (target_session_attrs=any).
+    with connect(host=drills.fact(facts, "OLD_PRIMARY"), application_name="pglab-drill") as old:
+        on_old = drills.heartbeat_rows(old, run_id)
+    return drills.FailoverState(
+        primary=str(scalar(conn, "SELECT current_setting('cluster_name')")),
+        rows_on_primary=frozenset(drills.heartbeat_rows(conn, run_id)),
+        rows_on_rejoined=frozenset(on_old),
+        # A missing role counts as a superuser, so the check fails rather than passes.
+        rewind_role_is_superuser=superuser is not False,
+    )
+
+
 def cmd_drill_report(args: argparse.Namespace) -> int:
     folder = Path(args.dir)
     facts = drills.load_facts(folder / "facts.env")
@@ -211,9 +227,11 @@ def cmd_drill_report(args: argparse.Namespace) -> int:
             )
             attempts = drills.load_attempts(folder / "heartbeat.jsonl")
             result = drills.analyse_pitr(facts, attempts, recovered, measured=args.measure)
-        else:
+        elif args.drill == "switchover":
             attempts = drills.load_attempts(folder / "heartbeat.jsonl")
             result = drills.analyse_switchover(conn, facts, attempts, measured=args.measure)
+        else:
+            result = drills.analyse_failover(facts, _failover_state(conn, facts))
     text = drills.render(result, info, command=args.label)
     default = REPORTS_DIR / f"{args.drill}-drill.md"
     _write(Path(args.output) if args.output else default, text)
@@ -344,7 +362,7 @@ def _reliability_commands(sub: Subparsers) -> None:
     p.set_defaults(func=cmd_monitor_check)
 
     p = sub.add_parser("drill-report", help="check a drill's outcome and write its report")
-    p.add_argument("drill", choices=("pitr", "switchover"))
+    p.add_argument("drill", choices=("pitr", "switchover", "failover"))
     p.add_argument("--dir", required=True, help="the drill folder with facts.env and heartbeat")
     p.add_argument("--output", default=None)
     p.add_argument("--measure", action="store_true", help="publish the measured durations")

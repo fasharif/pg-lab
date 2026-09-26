@@ -56,6 +56,9 @@ Reliability
   switchover [--measure]   planned switchover: promote the standby, pg_rewind the old primary
                            and rejoin it, while a client keeps writing
                            (reports/switchover-drill.md); run it twice to switch back
+  failover-drill           unplanned failover: promote the standby while the primary still
+                           writes, then pg_rewind (as the non-superuser role rewind) and
+                           rejoin the diverged old primary (reports/failover-drill.md)
 
 Monitoring
   monitor up|check|down    postgres_exporter per node, Prometheus (alert rules) and Grafana
@@ -74,7 +77,8 @@ SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
 CI
   ci                       the whole lab at SCALE=LAB_SCALE, as GitHub Actions runs it: up, seed,
                            casebook, partitions, tests, PITR drill, replica, switchover there
-                           and back, tests again, monitoring (reports go to out/reports)
+                           and back, failover drill, tests again, monitoring (reports go to
+                           out/reports)
 
 Tests
   test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
@@ -289,6 +293,8 @@ cmd_ci() {
   unset LAB_PRIMARY_HOST
   switchover
   unset LAB_PRIMARY_HOST
+  failover_drill
+  unset LAB_PRIMARY_HOST
   cmd_test
   cmd_monitor up
   cmd_monitor check
@@ -408,6 +414,7 @@ main() {
     pitr-drill) pitr_drill "$@" ;;
     replica) cmd_replica "$@" ;;
     switchover) switchover "$@" ;;
+    failover-drill) failover_drill "$@" ;;
     ci) cmd_ci "$@" ;;
     test) cmd_test "$@" ;;
     check) cmd_check "$@" ;;
