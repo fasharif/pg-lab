@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pglab import casebook
+from pglab.casebook import CREATE_INDEX
 from pglab.db import Connection, scalar
 from pglab.definitions import Case
 from pglab.execute import explain_raw
@@ -28,9 +29,6 @@ from pglab.report import RunInfo, table
 PROBE_ROWS = 5000
 PROBE_REPEATS = 3
 PROBE_PREFIX = "walprobe-"
-CREATE_INDEX = re.compile(
-    r'CREATE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?', re.IGNORECASE
-)
 
 PROBES: dict[str, str] = {
     "audit_logs": f"""

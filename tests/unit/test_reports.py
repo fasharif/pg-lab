@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from pglab.casebook import CREATE_INDEX, statement_tag
 from pglab.definitions import WorkloadQuery
 from pglab.execute import Timing, is_timing_line
-from pglab.indexing import CREATE_INDEX, human_bytes
+from pglab.indexing import human_bytes
 from pglab.report import PENDING, RunInfo, code, ms, table
 from pglab.workload import WorkloadResult, rank, render_report
 from tests.conftest import load_plan
@@ -95,3 +96,12 @@ def test_human_bytes() -> None:
     assert human_bytes(512) == "512 B"
     assert human_bytes(24576) == "24.0 kB"
     assert human_bytes(8_300_000) == "7.9 MB"
+
+
+def test_statement_tag_ignores_whitespace_and_tracks_the_definition() -> None:
+    one = 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "i" ON orders ("createdAt")'
+    same = 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "i"\n    ON orders  ("createdAt")'
+    other = 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "i" ON orders ("createdAt") INCLUDE (x)'
+    assert statement_tag(one) == statement_tag(same)
+    assert statement_tag(one) != statement_tag(other)
+    assert statement_tag(one).startswith("pglab casebook fix ")
