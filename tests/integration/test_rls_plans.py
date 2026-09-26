@@ -1,9 +1,10 @@
 """Row-level security must not cost the tenant queries their indexes.
 
 The customer-facing API runs every statement under the orders policies, which add
-"organizationId = app.org_id() OR ..." and a membership gate to the query. These tests check
-that the organisation's order page still uses the casebook's index as topflow_app, and that it
-returns the same rows as the owner sees.
+app.is_tenant_row("organizationId", "userId") and a membership gate to the query. These tests
+check, as topflow_app, that the organisation's order page still uses the casebook's index with
+a wide cost margin, that its total stays an index-only scan, and that the page returns the same
+rows as the owner sees.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import pytest
 from pglab import casebook
 from pglab.db import Connection, connect
 from pglab.definitions import load_cases, load_workload
-from pglab.execute import explain_json, render
+from pglab.execute import explain_json, plan_only, render
 
 ROOT = Path(__file__).resolve().parents[2]
 ORG_HISTORY = """
@@ -24,6 +25,13 @@ WHERE o."organizationId" = %(org_id)s
 ORDER BY o."createdAt" DESC
 LIMIT 20
 """
+ORG_TOTAL = """
+SELECT count(*) FROM orders AS o
+WHERE o."organizationId" = %(org_id)s
+"""
+# The best plan without index scans must cost at least this many times the chosen one. The lab's
+# policies give about 77 at SCALE=1000000; a transparent policy gives 1.1 (reports/rls-plans.md).
+MIN_COST_FACTOR = 2.0
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +63,33 @@ def test_org_history_keeps_its_index_under_rls() -> None:
     assert "orders_organizationId_createdAt_idx" in plan.indexes_used()
     assert "Sort" not in plan.node_types()
     assert plan.rows() == 20
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("tuned")
+def test_org_history_index_has_a_wide_cost_margin() -> None:
+    with connect("topflow_app") as conn:
+        org_id = _as_tenant(conn)
+        page = render(conn, ORG_HISTORY, {"org_id": org_id})
+        with conn.transaction(force_rollback=True):
+            chosen = plan_only(conn, page).cost()
+            conn.execute("SET LOCAL enable_indexscan = off")
+            conn.execute("SET LOCAL enable_indexonlyscan = off")
+            without_index = plan_only(conn, page).cost()
+    assert chosen is not None
+    assert without_index is not None
+    assert without_index >= MIN_COST_FACTOR * chosen, (chosen, without_index)
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("tuned")
+def test_org_total_stays_index_only_under_rls() -> None:
+    with connect("topflow_app") as conn:
+        org_id = _as_tenant(conn)
+        plan = explain_json(conn, render(conn, ORG_TOTAL, {"org_id": org_id}))
+    assert "Index Only Scan" in plan.node_types()
+    assert "orders" not in plan.seq_scanned()
+    assert "Bitmap Heap Scan" not in plan.node_types()
 
 
 @pytest.mark.integration

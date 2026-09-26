@@ -49,6 +49,11 @@ def explain_json(conn: Connection, statement: str, *, timing: bool = False) -> P
     return parse_plan(explain_raw(conn, statement, options)[0][0])
 
 
+def plan_only(conn: Connection, statement: str) -> Plan:
+    """The plan the planner would choose, without running the statement."""
+    return parse_plan(explain_raw(conn, statement, "FORMAT JSON")[0][0])
+
+
 def explain_text(conn: Connection, statement: str, *, timing: bool = False) -> str:
     """Text plan. Without `timing`, durations are removed: TIMING OFF and SUMMARY OFF drop
     node and statement times, and the "I/O Timings" lines that track_io_timing adds even

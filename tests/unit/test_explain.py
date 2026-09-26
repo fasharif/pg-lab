@@ -27,6 +27,36 @@ def test_parses_org_history_after_fix() -> None:
     assert plan.seq_scanned() == set()
 
 
+def test_estimates_and_costs_are_parsed() -> None:
+    plan = load_plan("orders-org-history.after")
+    scan = next(node for node in plan.nodes() if node.relation == "orders")
+    assert scan.plan_rows is not None
+    assert plan.root.plan_rows == 20  # LIMIT keeps 20 of the rows the scan is estimated to find
+    assert scan.plan_rows > 20
+    cost = plan.cost()
+    assert cost is not None
+    assert scan.total_cost is not None
+    assert 0 < cost < scan.total_cost
+
+
+def test_plan_without_analyze_has_no_actual_rows() -> None:
+    plan = parse_plan(
+        [
+            {
+                "Plan": {
+                    "Node Type": "Seq Scan",
+                    "Relation Name": "orders",
+                    "Plan Rows": 5,
+                    "Total Cost": 12.5,
+                }
+            }
+        ]
+    )
+    assert plan.rows() is None
+    assert plan.cost() == 12.5
+    assert plan.root.plan_rows == 5
+
+
 def test_seq_scans_and_parallel_plans_are_found() -> None:
     plan = load_plan("dashboard-revenue-30d.before")
     assert plan.seq_scanned() == {"orders"}

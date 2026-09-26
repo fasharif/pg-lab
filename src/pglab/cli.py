@@ -173,10 +173,14 @@ def cmd_rls_report(args: argparse.Namespace) -> int:
     with connect("postgres", application_name="pglab-rls") as conn:
         info = run_info(conn, measured=False, runs=0)
         casebook.apply_all(conn, cases)
-        statement, variants = rls.compare(conn)
-    _write(Path(args.output), rls.render_report(statement, variants, info, command=args.label))
-    for variant in variants:
-        print(f"{variant.plan.shared_buffers():>8,} buffers  {variant.label}")
+        page, count, variants = rls.compare(conn)
+    _write(Path(args.output), rls.render_report(page, count, variants, info, command=args.label))
+    for v in variants:
+        print(
+            f"page {v.page.shared_buffers():>7,} buffers, total {v.count.shared_buffers():>7,}"
+            f" buffers, estimate {rls.orders_estimate(v.page) or 0:>8,.0f},"
+            f" cost factor without index {rls.cost_ratio(v) or 0:>6,.1f}  {v.label}"
+        )
     return 0
 
 

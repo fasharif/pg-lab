@@ -34,6 +34,8 @@ class PlanNode:
     node_type: str
     relation: str | None
     index: str | None
+    plan_rows: float | None
+    total_cost: float | None
     actual_rows: float | None
     actual_loops: float | None
     shared_hit: int
@@ -97,6 +99,10 @@ class Plan:
     def rows(self) -> float | None:
         return self.root.actual_rows
 
+    def cost(self) -> float | None:
+        """The planner's estimated total cost of the statement."""
+        return self.root.total_cost
+
 
 def _int(raw: Mapping[str, Any], key: str) -> int:
     value = raw.get(key, 0)
@@ -120,6 +126,8 @@ def _node(raw: Mapping[str, Any]) -> PlanNode:
         node_type=str(raw["Node Type"]),
         relation=str(relation) if relation is not None else None,
         index=str(index) if index is not None else None,
+        plan_rows=_float(raw, "Plan Rows"),
+        total_cost=_float(raw, "Total Cost"),
         actual_rows=_float(raw, "Actual Rows"),
         actual_loops=_float(raw, "Actual Loops"),
         shared_hit=_int(raw, "Shared Hit Blocks"),

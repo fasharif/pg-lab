@@ -40,7 +40,7 @@ whether each plan matches its expectation.
 | 2, 3 | `(userId, createdAt)` | same | none |
 | 4 | pg_trgm GIN indexes and a UNION rewrite | full-text indexes and `CONTAINS` in the UNION rewrite | SQL Server has no trigram index: full-text search matches words and word prefixes, not any substring. The rewrite searches for the order number's "year-sequence" prefix as a phrase; how the word breaker splits `TF-SO-2024-0000123` must be checked on the first run |
 | 5, 6, 7 | covering B-tree `createdAt INCLUDE (status, totalAmount)` | same (`INCLUDE` exists in both) | a columnstore index is SQL Server's alternative for large aggregates |
-| 8 | `(organizationId, createdAt)` | same | none |
+| 8 | `(organizationId, createdAt) INCLUDE (userId)` | `(organizationId, createdAt)` | PostgreSQL includes `userId` for its row-level security policy (docs/security.md); the SQL Server chapter has no RLS |
 | 9 | partial index `WHERE "isActive" AND NOT "isTradeOnly"` | filtered index `WHERE isActive = 1 AND isTradeOnly = 0` | SQL Server matches a filtered index only when the predicate is visible at compile time, so the statement keeps literals (or needs `OPTION (RECOMPILE)` with parameters) |
 | 10 | `(status, updatedAt)`, drop `(status)` | same | none |
 

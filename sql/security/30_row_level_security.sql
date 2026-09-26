@@ -8,15 +8,19 @@
 --            set_config('app.org_id',  '<organization id or empty>', true);
 --
 -- Two kinds of policy work together on every tenant table:
---   * a permissive policy says which rows belong to the context (the organisation's rows,
---     or the customer's own). It compares columns with app.org_id() and app.user_id(),
---     plain SQL functions that PostgreSQL inlines, so the planner sees current_setting()
---     and estimates with the real value;
+--   * a permissive policy says which rows belong to the context: the organisation's rows,
+--     or the customer's own rows outside any organisation. On the tables where rows can be
+--     either (orders, quote requests, quotations, addresses), the test is one PL/pgSQL
+--     function, app.is_tenant_row(organisation, owner);
 --   * a restrictive policy checks once per statement that the user really is a member of
 --     the organisation they claim (app.context_is_valid(), evaluated as an InitPlan).
--- Putting the membership lookup inside the permissive policies instead hides the organisation
--- from the planner's estimates and costs the tenant queries their indexes (measured in
--- docs/security.md, "RLS and query plans").
+-- Why a function the planner cannot see into: the API already filters by organisation. With
+-- a transparent policy the planner reads the setting while planning, applies the
+-- organisation's share of the rows twice (the API's predicate and the policy's) and expects a
+-- small fraction of the real rows, which brings a bitmap scan and sort close to the cost of
+-- the (organizationId, createdAt) index scan. For an opaque function it assumes a fixed third
+-- of the rows, whichever the organisation. docs/security.md, "RLS and query plans", has the
+-- measurements.
 --
 -- TopFlow already enables RLS on every table (migration 20260916090000) without policies;
 -- the owner bypasses it. Flows that cross tenant boundaries (sign-up, accepting an
@@ -63,6 +67,19 @@ AS $$
                    WHERE m."organizationId" = app.org_id() AND m."userId" = app.user_id())
 $$;
 
+-- The organisation's row, or the customer's own row outside any organisation. PL/pgSQL so
+-- that it is never inlined (see the header); NULL comparisons count as "not visible".
+-- COST 10 rather than the default 100 for non-C functions: it is two comparisons, and at 100
+-- the planner moved a 10,000-row count to a parallel plan to share out the calls.
+CREATE OR REPLACE FUNCTION app.is_tenant_row(row_org text, row_owner text) RETURNS boolean
+LANGUAGE plpgsql STABLE PARALLEL SAFE COST 10
+AS $$
+BEGIN
+    RETURN coalesce(row_org = app.org_id() OR (row_org IS NULL AND row_owner = app.user_id()),
+                    false);
+END
+$$;
+
 -- Trade-only products are visible to members of verified (ACTIVE) organisations only.
 CREATE OR REPLACE FUNCTION app.has_trade_access() RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
@@ -77,10 +94,10 @@ AS $$
     )
 $$;
 
-REVOKE ALL ON FUNCTION app.user_id(), app.org_id(), app.context_is_valid(), app.has_trade_access()
-    FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.user_id(), app.org_id(), app.context_is_valid(), app.has_trade_access()
-    TO topflow_app;
+REVOKE ALL ON FUNCTION app.user_id(), app.org_id(), app.context_is_valid(), app.has_trade_access(),
+    app.is_tenant_row(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.user_id(), app.org_id(), app.context_is_valid(), app.has_trade_access(),
+    app.is_tenant_row(text, text) TO topflow_app;
 
 -- ─── Customer-facing API (topflow_app) ─────────────────────────────────────
 -- Customers: themselves, and colleagues in the organisation they act for. Column
@@ -112,18 +129,14 @@ CREATE POLICY invitations_app ON organization_invitations FOR ALL TO topflow_app
     USING ("organizationId" = app.org_id()) WITH CHECK ("organizationId" = app.org_id());
 
 CREATE POLICY addresses_app ON addresses FOR ALL TO topflow_app
-    USING ("organizationId" = app.org_id()
-           OR ("organizationId" IS NULL AND "userId" = app.user_id()))
-    WITH CHECK ("organizationId" = app.org_id()
-                OR ("organizationId" IS NULL AND "userId" = app.user_id()));
+    USING (app.is_tenant_row("organizationId", "userId"))
+    WITH CHECK (app.is_tenant_row("organizationId", "userId"));
 
 -- Orders: the organisation's orders, or the customer's own retail orders (TopFlow's
 -- listMine filters organizationId IS NULL in the same way).
 CREATE POLICY orders_app ON orders FOR ALL TO topflow_app
-    USING ("organizationId" = app.org_id()
-           OR ("organizationId" IS NULL AND "userId" = app.user_id()))
-    WITH CHECK ("organizationId" = app.org_id()
-                OR ("organizationId" IS NULL AND "userId" = app.user_id()));
+    USING (app.is_tenant_row("organizationId", "userId"))
+    WITH CHECK (app.is_tenant_row("organizationId", "userId"));
 -- Child rows follow their order: the subquery is itself filtered by orders_app.
 CREATE POLICY order_items_app ON order_items FOR ALL TO topflow_app
     USING (EXISTS (SELECT 1 FROM orders AS o WHERE o.id = order_items."orderId"))
@@ -133,10 +146,8 @@ CREATE POLICY order_events_app ON order_status_events FOR ALL TO topflow_app
     WITH CHECK (EXISTS (SELECT 1 FROM orders AS o WHERE o.id = order_status_events."orderId"));
 
 CREATE POLICY rfqs_app ON quote_requests FOR ALL TO topflow_app
-    USING ("organizationId" = app.org_id()
-           OR ("organizationId" IS NULL AND "requestedById" = app.user_id()))
-    WITH CHECK ("organizationId" = app.org_id()
-                OR ("organizationId" IS NULL AND "requestedById" = app.user_id()));
+    USING (app.is_tenant_row("organizationId", "requestedById"))
+    WITH CHECK (app.is_tenant_row("organizationId", "requestedById"));
 CREATE POLICY rfq_items_app ON quote_request_items FOR ALL TO topflow_app
     USING (EXISTS (SELECT 1 FROM quote_requests AS r WHERE r.id = quote_request_items."quoteRequestId"))
     WITH CHECK (EXISTS (SELECT 1 FROM quote_requests AS r
@@ -144,12 +155,8 @@ CREATE POLICY rfq_items_app ON quote_request_items FOR ALL TO topflow_app
 
 -- Quotations: never drafts (TopFlow's orgList and personalList hide them too).
 CREATE POLICY quotations_app ON quotations FOR ALL TO topflow_app
-    USING (status <> 'DRAFT'
-           AND ("organizationId" = app.org_id()
-                OR ("organizationId" IS NULL AND "customerId" = app.user_id())))
-    WITH CHECK (status <> 'DRAFT'
-                AND ("organizationId" = app.org_id()
-                     OR ("organizationId" IS NULL AND "customerId" = app.user_id())));
+    USING (status <> 'DRAFT' AND app.is_tenant_row("organizationId", "customerId"))
+    WITH CHECK (status <> 'DRAFT' AND app.is_tenant_row("organizationId", "customerId"));
 CREATE POLICY quotation_items_app ON quotation_items FOR SELECT TO topflow_app
     USING (EXISTS (SELECT 1 FROM quotations AS q WHERE q.id = quotation_items."quotationId"));
 

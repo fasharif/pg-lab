@@ -49,10 +49,12 @@ SELECT set_config('app.user_id', '<user id>', true),
 Two kinds of policy work together on every tenant table:
 
 1. **Permissive policies** say which rows belong to the context: the organisation's rows, or the
-   customer's own rows with no organisation (retail orders, personal quotations). They compare
-   columns with `app.org_id()` and `app.user_id()`, plain SQL functions over `current_setting()`
-   that PostgreSQL inlines. Child tables follow their parent (`order_items` through `orders`).
-   Customers never see draft quotations, as in TopFlow's `orgList`.
+   customer's own rows with no organisation (retail orders, personal quotations). On the four
+   tables where a row can be either (orders, quote requests, quotations, addresses) the test is
+   `app.is_tenant_row(organisation, owner)`, a PL/pgSQL function over `current_setting()`; the
+   section on query plans below explains why it is PL/pgSQL. Child tables follow their parent
+   (`order_items` through `orders`). Customers never see draft quotations, as in TopFlow's
+   `orgList`.
 2. **A restrictive policy** (`<table>_app_context`) checks that the user is a member of the
    organisation they claim. It calls a `SECURITY DEFINER` function with a pinned `search_path`,
    and because it references no column it runs once per statement as an InitPlan.
@@ -74,20 +76,64 @@ tenants, A and B. As a member of A acting for A:
 
 A forged organisation id, a missing context and a retail customer are checked too, and so are
 the staff and analyst roles. The suite was checked against a broken policy (`USING (true)` on
-orders): twelve of its checks failed, and they passed again once the policy was restored.
+orders): eleven of its checks failed, and they passed again once the policy was restored.
 
 ### RLS and query plans
 
-Policies are predicates that PostgreSQL adds to every query, so their shape matters for
-performance. The first version of the policies put the membership lookup inside the permissive
-policy, `"organizationId" = (SELECT app.current_org_id())`. The planner cannot estimate a
-comparison with an InitPlan value, assumed that almost no order would pass it and gave up the
-casebook's `(organizationId, createdAt)` index for the organisation's order page.
+Policies are predicates that PostgreSQL adds to every query, so their shape decides the plans.
+The API's own queries already filter by organisation (`WHERE "organizationId" = $1`); the policy
+repeats that test, and how the planner estimates the repetition decides whether the
+organisation's order page keeps casebook case 8's index.
 
-`./lab rls-plans` rebuilds both designs and writes `reports/rls-plans.md`: the order page planned
-as the owner, as `topflow_app` with the lab's policies (inline settings plus the gate) and as
-`topflow_app` with the lookup inside the policy (applied in a transaction and rolled back). The
-integration test `test_rls_plans.py` fails if the tenant query loses its index.
+`./lab rls-plans` plans the page and its total as the owner and as `topflow_app` under three
+policy designs, and once more with case 8's index built without `INCLUDE ("userId")`. The
+alternatives are applied in a transaction that is rolled back. From `reports/rls-plans.md`
+(SCALE=1000000, the largest organisation, 9,943 orders):
+
+| Planned as | Estimated rows | Page | Cost without index scans | Total |
+| --- | ---: | --- | ---: | --- |
+| owner, no RLS | 9,893 | index scan, 18 buffers | 459x | index-only scan, 17 buffers |
+| lab policies | 1,649 | index scan, 21 buffers | 76x | index-only scan, 146 buffers |
+| lab policies, index without `userId` | 1,649 | index scan, 21 buffers | 76x | bitmap heap scan, 6,764 buffers |
+| transparent policy | 263 | index scan, 21 buffers | 1.1x | index-only scan, 146 buffers |
+| lookup inside the policy | 25 | bitmap heap scan and sort, 6,899 buffers | 1.0x | bitmap heap scan, 6,899 buffers |
+
+*Cost without index scans* is the planner's cost for the best page plan it finds with index
+scans disabled, as a multiple of the chosen plan's cost: how far the page is from losing its
+index. What each design does to the estimate:
+
+- **Membership lookup inside the policy**, `"organizationId" = (SELECT member_org())`, the
+  usual first design and the lab's first version. The planner cannot know the subquery's value
+  when it plans, so it assumes the average organisation's share of the orders and expects 25
+  rows. Fetching 25 rows with a bitmap scan and sorting them looks cheapest; the page reads all
+  9,943 orders (6,899 buffers) to return 20.
+- **Transparent policy**, `"organizationId" = app.org_id() OR ...`, where `app.org_id()` is an
+  SQL function that PostgreSQL inlines. The planner evaluates `current_setting()` while
+  planning, so it knows the organisation, but it applies the organisation's share twice, once
+  for the query's predicate and once for the policy's, as if they were independent. The largest
+  organisation has 5% of the orders, so the estimate is about 5% of the real count, and the
+  smaller the organisation, the smaller the fraction. The page keeps its index here, but the
+  bitmap plan is only 1.1 times the cost: a different statistics sample or a little more data
+  can tip it.
+- **Tenant-row function**, the lab's design. PL/pgSQL functions are never inlined, so the
+  planner uses its default selectivity for a boolean function, one third, and one half for the
+  membership gate: it expects one sixth of the real rows whichever the organisation, and the
+  bitmap plan costs 76 times the index scan. The function is declared `COST 10`: with the
+  default cost of 100 for non-C functions, the planner ran the organisation's count as a
+  parallel index-only scan to share out the function calls.
+
+The total needs one more change. Under RLS the count evaluates the policy for every row, and the
+policy reads `userId` as well as `organizationId`. With `(organizationId, createdAt)` alone the
+count visits all the organisation's orders in the heap (6,764 buffers); with `userId` in the
+index it stays an index-only scan (146). The owner needs 17 buffers because it counts on the
+smaller `(organizationId, status)` index, whose repeated keys B-tree deduplication compresses.
+The price is index size: `docs/indexing.md` gives the index's size with and without `userId`.
+
+Estimates are the fragile part of this design, not correctness: every design returns the same
+rows. The integration tests (`tests/integration/test_rls_plans.py`) run as `topflow_app` and
+fail if the page loses its index or has a sort, if the index scan's cost margin falls below a
+factor of 2, if the total stops being an index-only scan, or if the page differs from the
+owner's.
 
 ## Limitations
 
