@@ -93,7 +93,9 @@ The checks:
   primary, rather than reporting `no rewind required`;
 - the role pg_rewind connected as is not a superuser: `rewind` has `EXECUTE` on
   `pg_ls_dir`, `pg_stat_file` and the two `pg_read_binary_file` functions, as the pg_rewind
-  documentation lists, and nothing else. This drill is where those grants are exercised;
+  documentation lists, and nothing else. This drill is where those grants are exercised. The
+  functions read any file of the data directory, so the drills let the role log in only while
+  pg_rewind runs (`ALTER ROLE rewind LOGIN`, then `NOLOGIN`; docs/security.md);
 - the old primary streams from the new one again, has the new primary's write and none of the
   500 rows.
 

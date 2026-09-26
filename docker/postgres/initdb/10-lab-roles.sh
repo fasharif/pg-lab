@@ -52,8 +52,10 @@ CREATE ROLE monitor LOGIN PASSWORD :'monitor_pw' CONNECTION LIMIT 5;
 GRANT pg_monitor TO monitor;
 ALTER ROLE monitor SET statement_timeout = '10s';
 
--- pg_rewind without a superuser: the four functions it calls on the source server.
-CREATE ROLE rewind LOGIN PASSWORD :'rewind_pw' CONNECTION LIMIT 2;
+-- pg_rewind without a superuser: the four functions it calls on the source server. They read
+-- any file in the data directory, so the role stays NOLOGIN except while a drill runs
+-- pg_rewind (scripts/drills.sh), and pg_hba.conf limits it to the maintenance database.
+CREATE ROLE rewind NOLOGIN PASSWORD :'rewind_pw' CONNECTION LIMIT 1;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_dir(text, boolean, boolean) TO rewind;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_file(text, boolean) TO rewind;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text) TO rewind;

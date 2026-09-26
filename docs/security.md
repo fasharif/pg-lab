@@ -14,9 +14,9 @@ Tests: `tests/pgtap/02_roles_and_privileges.sql`, `03_tenant_isolation.sql`,
 | `topflow_app` | yes | The customer-facing API, always inside row-level security. `UPDATE` only on the columns a customer flow changes (column privileges): an order's status and cancellation fields, a quotation's status and response fields, a request's status, a member's role and approval limit. Order lines only while placing an order, and order history only as its own flows write it (policies). No `DELETE` on orders, no `UPDATE` or `DELETE` on audit entries or order history, no `INSERT` of members or organisations, no privilege on the shared document counters. |
 | `topflow_backoffice` | yes | Top Flow staff. Every tenant, same append-only rules, `DELETE` only where the back office deletes (draft quotations, empty categories, members, addresses). Runs the flows that cross tenants: registering a trade account, accepting an invitation, KYC review. |
 | `topflow_analyst` | yes | Read-only reporting (`default_transaction_read_only`). Every tenant, but no personal contact data: e-mail, names, phone numbers, street addresses and delivery addresses are excluded by column privileges. |
-| `replicator` | yes | Streaming replication and `pg_basebackup` only. |
+| `replicator` | yes | Streaming replication and `pg_basebackup` only, from the lab network. The replication stream carries every row, so this role can read all data. |
 | `monitor` | yes | Member of `pg_monitor`, for postgres_exporter. |
-| `rewind` | yes | pg_rewind: `EXECUTE` on the four file functions it calls, nothing else. |
+| `rewind` | only during a drill | pg_rewind: `EXECUTE` on the four file functions it calls (`pg_ls_dir`, `pg_stat_file` and two `pg_read_binary_file`). Those functions read any file in the data directory: every table's data files, including the users' e-mail addresses, and `pg_authid` with every role's SCRAM verifier. So the role bypasses row-level security and column privileges in practice. It is `NOLOGIN` except while a drill runs pg_rewind (`scripts/drills.sh` switches it on and off), may connect only to the maintenance database from the lab network, one session at a time. |
 
 Five of these are application roles (owner, migrator, app, back office, analyst) and three are
 infrastructure roles (replicator, monitor, rewind).
@@ -30,7 +30,11 @@ if any table the API can read has no policy for it.
 - `password_encryption = scram-sha-256`; every login role has a SCRAM verifier (pgTAP checks
   `pg_authid`).
 - `pg_hba.conf` has no `trust`, `password` or `md5` lines. Replication is limited to `replicator`
-  from the lab network, and the superuser is rejected from outside it.
+  from the lab network, `rewind` to the maintenance database from the lab network, and the
+  superuser is rejected from outside it. `samenet` is the Docker network's subnet. The ports are
+  published on 127.0.0.1 only, but depending on the Docker engine a connection through a
+  published port can arrive from the network's gateway address, which is inside that subnet:
+  these lines narrow where a login can come from, and the passwords remain the barrier.
 - The integration tests log in over the network: the right password works, a wrong one is
   refused, and a client that insists on SCRAM (`require_auth=scram-sha-256`) connects.
 - Passwords are random, created by `./lab init` in `.env` (not committed); `.env.example` holds

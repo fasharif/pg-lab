@@ -206,6 +206,19 @@ pitr_drill() {
   pglab "./lab pitr-drill ${measure[*]}" drill-report pitr --dir "/work/$DRILL_DIR" "${measure[@]}"
 }
 
+# Runs pg_rewind on the stopped node $1 against the running primary $2 and prints its output.
+# pg_rewind connects as the role rewind, whose file functions can read every file of the data
+# directory, so the role may log in only for the length of this call (docs/security.md).
+rewind_against() {
+  local target=$1 source=$2 output status=0
+  node_psql "$source" -c 'ALTER ROLE rewind LOGIN' >/dev/null
+  output=$(offline "$target" pg_rewind --target-pgdata="$PGDATA_PATH" \
+    --source-server="host=$source port=5432 user=rewind dbname=postgres" 2>&1) || status=$?
+  node_psql "$source" -c 'ALTER ROLE rewind NOLOGIN' >/dev/null
+  [ "$status" -eq 0 ] || die "pg_rewind failed: $output"
+  printf '%s\n' "$output"
+}
+
 # Restarts a stopped former primary (already rewound) as a streaming standby of $2.
 rejoin_as_standby() {
   local node=$1 primary=$2
@@ -267,9 +280,7 @@ switchover() {
   LAB_PRIMARY_HOST=$new
 
   log "4/6 pg_rewind $old against $new"
-  rewind=$(offline "$old" pg_rewind --target-pgdata="$PGDATA_PATH" \
-    --source-server="host=$new port=5432 user=rewind dbname=postgres" 2>&1) ||
-    die "pg_rewind failed: $rewind"
+  rewind=$(rewind_against "$old" "$new")
   printf '%s\n' "$rewind" | sed 's/^/    /' >&2
   record REWIND_OK 1
   record REWIND_SUMMARY "$(printf '%s' "$rewind" | tail -n 1 | tr -d '\r')"
@@ -324,9 +335,7 @@ failover_drill() {
   ensure_slot "$new" "$old"
 
   log "4/6 pg_rewind $old against $new as the non-superuser role rewind"
-  rewind=$(offline "$old" pg_rewind --target-pgdata="$PGDATA_PATH" \
-    --source-server="host=$new port=5432 user=rewind dbname=postgres" 2>&1) ||
-    die "pg_rewind failed: $rewind"
+  rewind=$(rewind_against "$old" "$new")
   printf '%s\n' "$rewind" | sed 's/^/    /' >&2
   diverged=$(printf '%s\n' "$rewind" | grep -m 1 'servers diverged at' | sed 's/^pg_rewind: //' | tr -d '\r' || true)
   record REWIND_DIVERGED "$diverged"

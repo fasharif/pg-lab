@@ -173,7 +173,7 @@ with a random value. `.env` is ignored by git.
 | Command | What it runs |
 | --- | --- |
 | `./lab check` | ruff, mypy --strict, 72 unit tests (plans recorded from the lab, report rendering, drill analysis, monitoring check, SQL Server parser), workload and casebook validation, sqlfluff syntax checks of `sql/lab`, `sql/security`, `sql/partitioning` and `sqlserver/sql` (not the generator, the pgTAP suites or the workload statements), promtool on the alert rules and their 10 scenarios, shellcheck |
-| `./lab test` | 179 pgTAP tests (schema; roles, table and column privileges; tenant isolation and customer writes; SCRAM and pg_hba; partition functions, which need `./lab partition` first) and 20 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS, the policy design, casebook indexes rebuilt when invalid or outdated) |
+| `./lab test` | 182 pgTAP tests (schema; roles, table and column privileges; tenant isolation and customer writes; SCRAM and pg_hba; partition functions, which need `./lab partition` first) and 20 integration tests (live logins, session defaults, the tenant queries keeping their indexes under RLS, the policy design, casebook indexes rebuilt when invalid or outdated) |
 | `./lab casebook` | the ten plan checks, before and after, and the rewrite's result check |
 | `./lab ci` | the whole lab at LAB_SCALE: up, seed, casebook, partitions and maintenance, tests, RLS plans, PITR drill, replica, switchover and back, failover drill, tests again, monitoring check |
 

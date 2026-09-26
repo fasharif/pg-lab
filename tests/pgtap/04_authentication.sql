@@ -3,7 +3,7 @@
 -- tests/integration/test_authentication.py.
 BEGIN;
 SET LOCAL search_path = public, tap;
-SELECT plan(7);
+SELECT plan(10);
 
 SELECT is(current_setting('password_encryption'), 'scram-sha-256',
           'new passwords are stored as SCRAM-SHA-256 verifiers');
@@ -38,6 +38,22 @@ SELECT ok(
               AND auth_method = 'reject'),
     'the superuser is rejected from outside the lab network'
 );
+SELECT ok(
+    EXISTS (SELECT 1 FROM pg_hba_file_rules
+            WHERE type = 'host' AND database = ARRAY['postgres'] AND user_name = ARRAY['rewind']
+              AND address = 'samenet' AND auth_method = 'scram-sha-256'),
+    'pg_rewind''s role may connect only to the maintenance database, from the lab network'
+);
+SELECT ok(
+    (SELECT min(line_number) FROM pg_hba_file_rules
+     WHERE user_name = ARRAY['rewind'] AND address = 'all' AND auth_method = 'reject')
+    < (SELECT min(line_number) FROM pg_hba_file_rules
+       WHERE type = 'host' AND user_name = ARRAY['all'] AND database = ARRAY['all']
+         AND auth_method = 'scram-sha-256'),
+    'and is rejected anywhere else, before the rule for the other roles'
+);
+SELECT is((SELECT rolcanlogin FROM pg_roles WHERE rolname = 'rewind'), false,
+          'pg_rewind''s role cannot log in outside the drills (its file functions read every file)');
 
 SELECT * FROM finish();
 ROLLBACK;
