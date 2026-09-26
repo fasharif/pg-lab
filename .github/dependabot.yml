@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - /docker/postgres
+      - /docker/runner
+      - /docker/prometheus
+      - /docker/grafana
+      - /sqlserver
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    ignore:
+      # PostgreSQL major upgrades need a dump/restore or pg_upgrade: a deliberate change.
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
