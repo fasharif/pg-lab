@@ -34,6 +34,8 @@ BEGIN
 END
 $$;
 GRANT USAGE ON SCHEMA public TO topflow_app, topflow_backoffice, topflow_analyst;
+-- postgres_exporter reads the pg_stat_statements view, which lives in schema public.
+GRANT USAGE ON SCHEMA public TO monitor;
 
 -- ─── Customer-facing API ────────────────────────────────────────────────────
 GRANT SELECT, INSERT, UPDATE ON

@@ -1,0 +1,117 @@
+# Alert rules for the lab's PostgreSQL nodes (metrics from postgres_exporter v0.20.1).
+# Unit tests: monitoring/prometheus/tests/postgres_test.yml (promtool test rules).
+groups:
+  - name: postgres-availability
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL on {{ $labels.node }} does not answer"
+          description: "postgres_exporter cannot query {{ $labels.node }}: the server is down or refuses the monitor role."
+
+      - alert: PostgresNoWritablePrimary
+        expr: (count(pg_up == 1 and on (node) pg_replication_is_replica == 0) or vector(0)) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No node accepts writes"
+          description: "Every reachable node is a standby (or none is reachable): the application cannot write."
+
+      - alert: PostgresWalArchivingFailing
+        expr: increase(pg_stat_archiver_failed_count[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL archiving fails on {{ $labels.node }}"
+          description: "archive_command (pgbackrest archive-push) failed {{ $value | humanize }} times in 10 minutes; point-in-time recovery would lose data and pg_wal keeps growing."
+
+  - name: postgres-replication
+    rules:
+      - alert: PostgresReplicationLagHigh
+        expr: pg_replication_lag_seconds > 30 and on (node) pg_replication_is_replica == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Standby {{ $labels.node }} is {{ $value | humanizeDuration }} behind"
+          description: "Replay lag above 30 seconds for 2 minutes: reads on the standby are stale and a failover would lose that much."
+
+      - alert: PostgresReplicationSlotInactive
+        expr: pg_replication_slots_active == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replication slot {{ $labels.slot_name }} on {{ $labels.node }} is not used"
+          description: "Its standby is not connected. The slot keeps WAL on the primary until the standby returns or the slot is dropped."
+
+      - alert: PostgresReplicationSlotRetainsWal
+        expr: pg_replication_slots_pg_wal_lsn_diff > 2 * 1024 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Slot {{ $labels.slot_name }} holds {{ $value | humanize1024 }}B of WAL on {{ $labels.node }}"
+          description: "WAL retained for a lagging or absent standby can fill the disk and stop the primary."
+
+  - name: postgres-workload
+    rules:
+      - alert: PostgresConnectionsHigh
+        expr: >-
+          sum by (node) (pg_stat_activity_count)
+            / on (node) max by (node) (pg_settings_max_connections) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.node }} uses {{ $value | humanizePercentage }} of max_connections"
+          description: "New connections will be refused when the limit is reached; check the application's pool sizes."
+
+      - alert: PostgresLongRunningTransaction
+        expr: max by (node) (pg_stat_activity_max_tx_duration{datname="topflow"}) > 300
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A transaction on {{ $labels.node }} has been open for {{ $value | humanizeDuration }}"
+          description: "Long transactions hold locks and stop VACUUM from removing dead rows (bloat)."
+
+      - alert: PostgresDeadlocks
+        expr: increase(pg_stat_database_deadlocks{datname="topflow"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deadlocks on {{ $labels.node }}"
+          description: "{{ $value | humanize }} deadlocks in 5 minutes; the log has the statements involved."
+
+      - alert: PostgresLowCacheHitRatio
+        expr: >-
+          (
+            sum by (node) (rate(pg_stat_database_blks_hit{datname="topflow"}[10m]))
+            / (sum by (node) (rate(pg_stat_database_blks_hit{datname="topflow"}[10m]))
+               + sum by (node) (rate(pg_stat_database_blks_read{datname="topflow"}[10m])))
+          ) < 0.95
+          and on (node) sum by (node) (rate(pg_stat_database_blks_read{datname="topflow"}[10m])) > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache hit ratio on {{ $labels.node }} is {{ $value | humanizePercentage }}"
+          description: "More than 5% of block reads miss shared_buffers under sustained load."
+
+      - alert: PostgresHighDeadTupleRatio
+        expr: >-
+          pg_stat_user_tables_n_dead_tup{datname="topflow"}
+            / (pg_stat_user_tables_n_live_tup{datname="topflow"} + pg_stat_user_tables_n_dead_tup{datname="topflow"})
+            > 0.2
+          and pg_stat_user_tables_n_dead_tup{datname="topflow"} > 10000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.relname }} on {{ $labels.node }} is {{ $value | humanizePercentage }} dead rows"
+          description: "Autovacuum is not keeping up with updates and deletes on this table (bloat)."

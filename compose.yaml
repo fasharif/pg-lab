@@ -129,7 +129,10 @@ services:
       DATA_SOURCE_PASS: ${LAB_MONITOR_PASSWORD}
 
   prometheus:
-    image: prom/prometheus:v3.15.0
+    build:
+      context: .
+      dockerfile: docker/prometheus/Dockerfile
+    image: pg-lab/prometheus:v3.15.0
     container_name: pg-lab-prometheus
     profiles: [monitoring]
     mem_limit: 256m
@@ -140,14 +143,16 @@ services:
     ports:
       - "127.0.0.1:${LAB_PROMETHEUS_PORT:-55490}:9090"
     volumes:
-      - ./monitoring/prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
 
   grafana:
-    image: grafana/grafana:13.2.2
+    build:
+      context: .
+      dockerfile: docker/grafana/Dockerfile
+    image: pg-lab/grafana:13.2.2
     container_name: pg-lab-grafana
     profiles: [monitoring]
-    mem_limit: 256m
+    mem_limit: 512m
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${LAB_GRAFANA_PASSWORD:?run ./lab init}
@@ -161,8 +166,6 @@ services:
     ports:
       - "127.0.0.1:${LAB_GRAFANA_PORT:-55430}:3000"
     volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
 
 volumes:

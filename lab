@@ -55,6 +55,12 @@ Reliability
                            and rejoin it, while a client keeps writing
                            (reports/switchover-drill.md); run it twice to switch back
 
+Monitoring
+  monitor up|down          postgres_exporter per node, Prometheus (alert rules) and Grafana
+                           (provisioned dashboard) on 127.0.0.1:55430
+  load [--seconds N] [--clients N]
+                           pgbench with TopFlow back-office traffic (default 120 s, 4 clients)
+
 Security
   rls-plans                the tenant's order page under two policy designs
                            (reports/rls-plans.md); leaves the schema tuned
@@ -198,6 +204,52 @@ cmd_replica() {
   esac
 }
 
+MONITORING_SERVICES=(exporter-pg1 exporter-pg2 prometheus grafana)
+
+cmd_monitor() {
+  require_env
+  case ${1:-up} in
+    up)
+      log "starting exporters, Prometheus and Grafana"
+      compose --profile monitoring up -d --build --wait "${MONITORING_SERVICES[@]}"
+      ensure_runner
+      # Grafana migrates its own database on first start; that can take minutes.
+      local waited=0
+      until runner python -c "import urllib.request; urllib.request.urlopen('http://grafana:3000/api/health', timeout=3)" 2>/dev/null; do
+        [ "$waited" -ge 300 ] && die "Grafana did not answer within 300s (docker logs pg-lab-grafana)"
+        sleep 5
+        waited=$((waited + 5))
+      done
+      info "Grafana:    http://127.0.0.1:$(env_value LAB_GRAFANA_PORT 55430)/d/pglab-postgres (anonymous read-only)"
+      info "Prometheus: http://127.0.0.1:$(env_value LAB_PROMETHEUS_PORT 55490)/alerts"
+      ;;
+    down)
+      compose --profile monitoring rm -sf "${MONITORING_SERVICES[@]}"
+      ;;
+    *) die "monitor: expected up or down" ;;
+  esac
+}
+
+cmd_load() {
+  require_env
+  local seconds=120 clients=4 primary
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --seconds) seconds=${2:?}; shift 2 ;;
+      --clients) clients=${2:?}; shift 2 ;;
+      *) die "load: unknown option $1" ;;
+    esac
+  done
+  [[ $seconds =~ ^[0-9]+$ && $clients =~ ^[0-9]+$ ]] || die "load: --seconds and --clients take whole numbers"
+  primary=$(primary_host)
+  log "pgbench on $primary for ${seconds}s with $clients clients (topflow_backoffice)"
+  # pgbench ships with the server package, so it runs from the node's own container.
+  compose cp workload/pgbench.sql "$primary:/tmp/pgbench.sql" >/dev/null
+  compose exec -T -u postgres -e PGPASSWORD="$(env_value LAB_BACKOFFICE_PASSWORD)" "$primary" \
+    pgbench --host=127.0.0.1 --username=topflow_backoffice --no-vacuum --progress=30 \
+    --time="$seconds" --client="$clients" --jobs=2 --file=/tmp/pgbench.sql topflow
+}
+
 cmd_test() {
   require_env
   ensure_runner
@@ -213,6 +265,14 @@ cmd_check() {
   log "ruff, mypy, unit tests and definitions"
   runner bash -c 'ruff format --check src tests && ruff check src tests && mypy \
     && python -m pytest -q -m "not integration" && python -m pglab validate'
+  log "promtool: alert rules, their unit tests and the Prometheus configuration"
+  # Works on a copy of the repository mount: on Windows, Docker Desktop could not read
+  # some nested bind mounts in this lab's folder.
+  docker run --rm --memory 256m -v "$LAB_ROOT_HOST:/src:ro" \
+    --entrypoint sh prom/prometheus:v3.15.0 -c \
+    'cp -r /src/monitoring/prometheus /tmp/p && cd /tmp/p \
+     && promtool check config prometheus.yml >/dev/null \
+     && promtool check rules rules/postgres.yml && promtool test rules tests/postgres_test.yml'
   log "shellcheck"
   docker run --rm -v "$LAB_ROOT_HOST:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 \
     --external-sources lab scripts/*.sh docker/postgres/*.sh docker/postgres/initdb/*.sh
@@ -287,6 +347,8 @@ main() {
     tune) cmd_tune "$@" ;;
     untune) cmd_untune "$@" ;;
     rls-plans) cmd_rls_plans "$@" ;;
+    monitor) cmd_monitor "$@" ;;
+    load) cmd_load "$@" ;;
     pitr-drill) pitr_drill "$@" ;;
     replica) cmd_replica "$@" ;;
     switchover) switchover "$@" ;;

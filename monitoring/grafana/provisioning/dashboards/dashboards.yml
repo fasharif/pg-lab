@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: pg-lab
+    folder: pg-lab
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

@@ -9,7 +9,7 @@ indexes) and `<workload id>.after.json` the tuned schema. Keys holding durations
 were removed when recording, so the files contain plan shape, row counts and buffer counts
 only. The unit tests use them to check plan parsing and the plan checks without a database.
 
-## exporter-metrics.txt
+## exporter-metric-names.txt
 
 Metric names exposed by postgres_exporter v0.20.1 against a lab node, used to check that
 every metric referenced by the Grafana dashboard and the Prometheus alert rules exists.
