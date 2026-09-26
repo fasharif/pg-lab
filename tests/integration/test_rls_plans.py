@@ -29,9 +29,11 @@ ORG_TOTAL = """
 SELECT count(*) FROM orders AS o
 WHERE o."organizationId" = %(org_id)s
 """
-# The best plan without index scans must cost at least this many times the chosen one. The lab's
-# policies give about 77 at SCALE=1000000; a transparent policy gives 1.2 (reports/rls-plans.md).
-MIN_COST_FACTOR = 2.0
+# The best plan without index scans must cost at least this many times the chosen one. With the
+# lab's policies `./lab rls-plans` gave a factor of 18.7 at SCALE=100000 (the CI data set) and 77
+# at SCALE=1000000 (reports/rls-plans.md); the transparent policy the docs argue against gave 2.2
+# and 1.2. A threshold of 10 tells the two designs apart at CI scale as well.
+MIN_COST_FACTOR = 10.0
 
 
 @pytest.fixture(scope="module")
@@ -79,6 +81,26 @@ def test_org_history_index_has_a_wide_cost_margin() -> None:
     assert chosen is not None
     assert without_index is not None
     assert without_index >= MIN_COST_FACTOR * chosen, (chosen, without_index)
+
+
+@pytest.mark.integration
+def test_orders_policy_uses_the_opaque_tenant_row_function() -> None:
+    """The design decision itself (ADR 10): the planner must not see into the tenant test."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT qual, with_check FROM pg_policies"
+            " WHERE schemaname = 'public' AND tablename = 'orders' AND policyname = 'orders_app'"
+        ).fetchone()
+        language = conn.execute(
+            "SELECT l.lanname FROM pg_proc AS p JOIN pg_language AS l ON l.oid = p.prolang"
+            " WHERE p.oid = 'app.is_tenant_row(text, text)'::regprocedure"
+        ).fetchone()
+    assert row is not None
+    qual, with_check = row
+    assert "app.is_tenant_row" in qual
+    assert "app.is_tenant_row" in with_check
+    assert "app.org_id()" not in qual
+    assert language == ("plpgsql",)
 
 
 @pytest.mark.integration
