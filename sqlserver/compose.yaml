@@ -1,14 +1,14 @@
 # SQL Server chapter (written, not run). Used only through ./lab sqlserver, which refuses
 # to start unless you set MSSQL_ACCEPT_EULA=Y yourself: running SQL Server means accepting
 # Microsoft's licence terms. See docs/sqlserver.md.
-name: pg-lab-mssql
+name: ${LAB_PROJECT:-pg-lab}-mssql
 
 services:
   mssql:
     build:
       context: .
-    image: pg-lab/mssql:2022-cu27-fts
-    container_name: pg-lab-mssql
+    image: ${LAB_PROJECT:-pg-lab}/mssql:2022-cu27-fts
+    container_name: ${LAB_PROJECT:-pg-lab}-mssql
     mem_limit: ${LAB_MSSQL_MEM_LIMIT:-3g}
     environment:
       ACCEPT_EULA: ${MSSQL_ACCEPT_EULA:?set MSSQL_ACCEPT_EULA=Y yourself to accept the SQL Server licence}

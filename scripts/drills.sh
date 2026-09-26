@@ -88,7 +88,7 @@ replica_up() {
   log "cloning $primary into a new standby $standby (pg_basebackup through slot $standby)"
   ensure_slot "$primary" "$standby"
   compose rm -sf "$standby" >/dev/null 2>&1 || true
-  docker volume rm "pg-lab_${standby}-data" >/dev/null 2>&1 || true
+  remove_volume "${standby}-data"
   env "$(bootstrap_var "$standby")=replica" docker compose --project-directory "$LAB_ROOT_HOST" \
     --profile replica up -d --wait "$standby"
   wait_until "$standby streams from $primary" 120 "$primary" \
@@ -111,7 +111,7 @@ replica_down() {
   standby=$(other_node "$primary")
   log "removing standby $standby and its slot"
   compose rm -sf "$standby" >/dev/null 2>&1 || true
-  docker volume rm "pg-lab_${standby}-data" >/dev/null 2>&1 || true
+  remove_volume "${standby}-data"
   node_psql "$primary" -c "SELECT pg_drop_replication_slot('$standby')
                            WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '$standby')" >/dev/null
 }

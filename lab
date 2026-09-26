@@ -229,7 +229,7 @@ cmd_monitor() {
       # Grafana migrates its own database on first start; that can take minutes.
       local waited=0
       until runner python -c "import urllib.request; urllib.request.urlopen('http://grafana:3000/api/health', timeout=3)" 2>/dev/null; do
-        [ "$waited" -ge 300 ] && die "Grafana did not answer within 300s (docker logs pg-lab-grafana)"
+        [ "$waited" -ge 300 ] && die "Grafana did not answer within 300s (docker logs $(container_name grafana))"
         sleep 5
         waited=$((waited + 5))
       done
@@ -353,6 +353,11 @@ cmd_psql() {
     esac
   done
   [ -n "$node" ] || node=$(current_primary) || die "no primary is running (./lab up)"
+  case $node in
+    pg1 | pg2) ;;
+    *) die "psql: --node must be pg1 or pg2 (got '$node')" ;;
+  esac
+  is_running "$node" || die "psql: $node is not running"
   ensure_runner
   local password_var
   case $user in
@@ -382,6 +387,8 @@ cmd_down() {
 main() {
   local cmd=${1:-help}
   [ $# -gt 0 ] && shift
+  lab_names
+  ensure_output_dirs
   case $cmd in
     init) cmd_init "$@" ;;
     up) cmd_up "$@" ;;

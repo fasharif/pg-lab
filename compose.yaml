@@ -3,7 +3,10 @@
 #
 # Profiles: (none) primary + runner · replica: second node · monitoring: exporters,
 # Prometheus, Grafana. Every port is bound to 127.0.0.1 only.
-name: pg-lab
+#
+# LAB_PROJECT (default pg-lab) names the Compose project, the containers, the volumes and the
+# images, so that two copies of the lab can run on one Docker host with different ports.
+name: ${LAB_PROJECT:-pg-lab}
 
 x-pg-environment: &pg-environment
   POSTGRES_PASSWORD: ${LAB_POSTGRES_PASSWORD:?run ./lab init to create .env}
@@ -19,7 +22,7 @@ x-pg-environment: &pg-environment
 x-pg-node: &pg-node
   build:
     context: docker/postgres
-  image: pg-lab/postgres:18.6
+  image: ${LAB_PROJECT:-pg-lab}/postgres:18.6
   shm_size: 256m
   mem_limit: ${LAB_PG_MEM_LIMIT:-1g}
   stop_grace_period: 60s
@@ -45,7 +48,7 @@ x-pg-node: &pg-node
 services:
   pg1:
     <<: *pg-node
-    container_name: pg-lab-pg1
+    container_name: ${LAB_PROJECT:-pg-lab}-pg1
     hostname: pg1
     environment:
       <<: *pg-environment
@@ -61,7 +64,7 @@ services:
 
   pg2:
     <<: *pg-node
-    container_name: pg-lab-pg2
+    container_name: ${LAB_PROJECT:-pg-lab}-pg2
     hostname: pg2
     profiles: [replica]
     mem_limit: ${LAB_PG2_MEM_LIMIT:-768m}
@@ -82,13 +85,18 @@ services:
     build:
       context: .
       dockerfile: docker/runner/Dockerfile
-    image: pg-lab/runner:dev
-    container_name: pg-lab-runner
+    image: ${LAB_PROJECT:-pg-lab}/runner:dev
+    container_name: ${LAB_PROJECT:-pg-lab}-runner
     init: true
     command: ["sleep", "infinity"]
+    # The runner writes into the bind-mounted repository (reports, drill logs, caches). It runs
+    # as the user who called ./lab (LAB_UID and LAB_GID, exported by ./lab), so that on a Linux
+    # host those files belong to that user and not to root.
+    user: "${LAB_UID:-1000}:${LAB_GID:-1000}"
     mem_limit: ${LAB_RUNNER_MEM_LIMIT:-512m}
     working_dir: /work
     environment:
+      HOME: /tmp
       PGHOST: pg1,pg2
       PGPORT: "5432,5432"
       PGDATABASE: topflow
@@ -108,7 +116,7 @@ services:
 
   exporter-pg1:
     image: prometheuscommunity/postgres-exporter:v0.20.1
-    container_name: pg-lab-exporter-pg1
+    container_name: ${LAB_PROJECT:-pg-lab}-exporter-pg1
     profiles: [monitoring]
     mem_limit: 96m
     command: ["--collector.stat_statements", "--collector.long_running_transactions", "--collector.stat_activity_autovacuum"]
@@ -119,7 +127,7 @@ services:
 
   exporter-pg2:
     image: prometheuscommunity/postgres-exporter:v0.20.1
-    container_name: pg-lab-exporter-pg2
+    container_name: ${LAB_PROJECT:-pg-lab}-exporter-pg2
     profiles: [monitoring]
     mem_limit: 96m
     command: ["--collector.stat_statements", "--collector.long_running_transactions", "--collector.stat_activity_autovacuum"]
@@ -132,8 +140,8 @@ services:
     build:
       context: .
       dockerfile: docker/prometheus/Dockerfile
-    image: pg-lab/prometheus:v3.15.0
-    container_name: pg-lab-prometheus
+    image: ${LAB_PROJECT:-pg-lab}/prometheus:v3.15.0
+    container_name: ${LAB_PROJECT:-pg-lab}-prometheus
     profiles: [monitoring]
     mem_limit: 256m
     command:
@@ -149,8 +157,8 @@ services:
     build:
       context: .
       dockerfile: docker/grafana/Dockerfile
-    image: pg-lab/grafana:13.2.2
-    container_name: pg-lab-grafana
+    image: ${LAB_PROJECT:-pg-lab}/grafana:13.2.2
+    container_name: ${LAB_PROJECT:-pg-lab}-grafana
     profiles: [monitoring]
     mem_limit: 512m
     environment:

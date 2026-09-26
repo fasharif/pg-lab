@@ -81,7 +81,7 @@ jobs:
       - name: Container logs on failure
         if: failure()
         run: |
-          for name in pg-lab-pg1 pg-lab-pg2 pg-lab-runner pg-lab-prometheus pg-lab-grafana; do
+          for name in $(docker ps -a --filter label=com.docker.compose.project=pg-lab --format '{{.Names}}'); do
             echo "::group::$name"
             docker logs --tail 200 "$name" || true
             echo "::endgroup::"

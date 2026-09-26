@@ -28,6 +28,39 @@ elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'; }
 compose() { docker compose --project-directory "$LAB_ROOT_HOST" "$@"; }
 compose_all() { compose --profile replica --profile monitoring "$@"; }
 
+# Names of the Compose project, its containers and volumes. LAB_PROJECT comes from the shell
+# or .env (default pg-lab); compose.yaml builds every name from the same variable. The runner
+# container runs as the calling user (LAB_UID:LAB_GID), so the files it writes into the
+# repository are not owned by root on a Linux host.
+lab_names() {
+  LAB_PROJECT=${LAB_PROJECT:-$(env_value LAB_PROJECT pg-lab)}
+  [[ $LAB_PROJECT =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
+    die "LAB_PROJECT must be lower-case letters, digits, '-' or '_' (got '$LAB_PROJECT')"
+  LAB_UID=$(id -u)
+  LAB_GID=$(id -g)
+  export LAB_PROJECT LAB_UID LAB_GID
+}
+
+container_name() { printf '%s-%s' "$LAB_PROJECT" "$1"; }
+volume_name() { printf '%s_%s' "$LAB_PROJECT" "$1"; }
+
+# Output folders are created on the host before any container writes into them. A container
+# that created them would make them belong to its own user, and the host could no longer add
+# drill folders (on Linux hosts, where bind mounts keep ownership).
+ensure_output_dirs() {
+  mkdir -p "$LAB_ROOT/out/reports" "$LAB_ROOT/out/drills" "$LAB_ROOT/out/sqlserver"
+}
+
+# Removes a named volume of the project; a volume that is still in use is an error, never
+# skipped, so that a new standby cannot start on an old data directory.
+remove_volume() {
+  local volume
+  volume=$(volume_name "$1")
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
+    docker volume rm "$volume" >/dev/null || die "could not remove volume $volume"
+  fi
+}
+
 require_env() {
   [ -f "$LAB_ROOT/.env" ] || die "no .env file: run ./lab init first"
 }
@@ -42,18 +75,19 @@ env_value() {
 
 is_running() {
   local name=$1
-  [ "$(docker inspect -f '{{.State.Running}}' "pg-lab-$name" 2>/dev/null || true)" = "true" ]
+  [ "$(docker inspect -f '{{.State.Running}}' "$(container_name "$name")" 2>/dev/null || true)" = "true" ]
 }
 
 wait_healthy() {
-  local service=$1 timeout=${2:-180} waited=0 state
+  local service=$1 timeout=${2:-180} waited=0 state name
+  name=$(container_name "$service")
   while :; do
-    state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "pg-lab-$service" 2>/dev/null || echo missing)
+    state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || echo missing)
     case $state in
       healthy | running) return 0 ;;
-      exited | dead | missing) die "container pg-lab-$service is $state; see: docker logs pg-lab-$service" ;;
+      exited | dead | missing) die "container $name is $state; see: docker logs $name" ;;
     esac
-    [ "$waited" -ge "$timeout" ] && die "pg-lab-$service not healthy after ${timeout}s (state: $state)"
+    [ "$waited" -ge "$timeout" ] && die "$name not healthy after ${timeout}s (state: $state)"
     sleep 1
     waited=$((waited + 1))
   done

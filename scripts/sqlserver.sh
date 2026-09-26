@@ -38,7 +38,7 @@ cmd_sqlserver() {
   case $action in
     up)
       require_eula
-      log "building and starting SQL Server 2022 Developer edition (pg-lab-mssql)"
+      log "building and starting SQL Server 2022 Developer edition ($LAB_PROJECT-mssql)"
       MSSQL_ACCEPT_EULA=Y mssql_compose up -d --build --wait mssql
       ;;
     seed)
