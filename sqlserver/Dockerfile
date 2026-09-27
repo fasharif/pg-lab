@@ -4,6 +4,8 @@
 FROM mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04
 
 USER root
+# The Full-Text Search package is pinned to the version of the base image's mssql-server
+# (CU27), so apt cannot pull a later engine in with it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl gnupg ca-certificates \
     && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
@@ -11,6 +13,7 @@ RUN apt-get update \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/mssql-server-2022 jammy main" \
         > /etc/apt/sources.list.d/mssql-server-2022.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends mssql-server-fts \
+    && apt-get install -y --no-install-recommends \
+        "mssql-server-fts=$(dpkg-query -W -f='${Version}' mssql-server)" \
     && rm -rf /var/lib/apt/lists/*
 USER mssql

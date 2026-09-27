@@ -19,8 +19,8 @@ MSSQL_ACCEPT_EULA=Y ./lab sqlserver casebook    # plans before, fixes, plans aft
 
 | File | Content |
 | --- | --- |
-| `sqlserver/Dockerfile` | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04` plus the Full-Text Search package from Microsoft's repository |
-| `sqlserver/compose.yaml` | one service on 127.0.0.1:55414, 3 GB memory limit, `MSSQL_PID=Developer` |
+| `sqlserver/Dockerfile` | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04` plus the Full-Text Search package from Microsoft's repository, pinned to the version of the image's `mssql-server` so that apt cannot pull in a later engine |
+| `sqlserver/compose.yaml` | one service on 127.0.0.1:55414, 3 GB memory limit, `MSSQL_PID=Developer`; the health check passes the password to sqlcmd in `SQLCMDPASSWORD`, not on its command line |
 | `sqlserver/sql/01_schema.sql` | the seven TopFlow tables the ten statements read, with TopFlow's indexes |
 | `sqlserver/sql/02_generate.sql` | generator with `GENERATE_SERIES` (new in SQL Server 2022) and `HASHBYTES`, same distributions as the PostgreSQL generator |
 | `sqlserver/sql/10_queries_before.sql`, `11_queries_after.sql` | the ten statements with `SET STATISTICS XML ON` and `SET STATISTICS IO ON` |
@@ -63,3 +63,6 @@ Two more differences matter for TopFlow's schema on SQL Server:
   (synthetic) sqlcmd output, and that `expectations.toml` covers the ten cases.
 - The licence guard: `./lab sqlserver up` without `MSSQL_ACCEPT_EULA=Y` stops with an
   explanation, and `docker compose` itself refuses the file without the variable.
+- `docker compose config` renders `sqlserver/compose.yaml`. The image itself has never been
+  built here, so the Full-Text Search pin (`dpkg-query` on the base image's `mssql-server`) is
+  unconfirmed until the first build.
