@@ -43,6 +43,13 @@ CREATE OR REPLACE FUNCTION lab.age_days(ts timestamp, anchor timestamp)
 RETURNS double precision LANGUAGE sql IMMUTABLE PARALLEL SAFE
 AS $$ SELECT extract(epoch FROM anchor - ts) / 86400.0 $$;
 
+-- Document numbers as TopFlow formats them (TF-SO-2026-000123): the yearly counter padded to
+-- six digits and never cut, like JavaScript's padStart. lpad alone truncates longer values,
+-- which made the millionth order of a year repeat the number of the 100,000th.
+CREATE OR REPLACE FUNCTION lab.document_number(prefix text, year int, n bigint) RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT prefix || '-' || year || '-' || lpad(n::text, greatest(6, length(n::text)), '0') $$;
+
 -- ─── People and organisations ───────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION lab.person_name(n bigint) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE

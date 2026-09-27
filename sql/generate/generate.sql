@@ -215,8 +215,8 @@ INSERT INTO quote_requests (id, number, "organizationId", "requestedById", "assi
                             "createdAt", "updatedAt", "companyName", "contactEmail",
                             "contactName", "contactPhone", source, "preferredContact")
 SELECT lab.uid('rfq', m.i),
-       'TF-RFQ-' || extract(year FROM m.created)::int || '-'
-           || lpad((row_number() OVER (PARTITION BY extract(year FROM m.created) ORDER BY m.i))::text, 6, '0'),
+       lab.document_number('TF-RFQ', extract(year FROM m.created)::int,
+                           row_number() OVER (PARTITION BY extract(year FROM m.created) ORDER BY m.i)),
        CASE WHEN NOT m.web THEN lab.uid('org', m.org) END,
        CASE WHEN NOT m.web THEN lab.uid('user', lab.member_user(m.org, 1 + floor(5 * lab.rnd(m.i, 104))::int)) END,
        CASE WHEN m.status <> 'SUBMITTED' THEN lab.uid('user', 3 + floor(10 * lab.rnd(m.i, 106))::int) END,
@@ -249,8 +249,8 @@ INSERT INTO quotations (id, number, revision, "quoteRequestId", "organizationId"
                         "respondedAt", "respondedById", "purchaseOrderNumber", "createdAt",
                         "updatedAt")
 SELECT lab.uid('quotation', m.i),
-       'TF-QT-' || extract(year FROM q.created)::int || '-'
-           || lpad((row_number() OVER (PARTITION BY extract(year FROM q.created) ORDER BY m.i))::text, 6, '0'),
+       lab.document_number('TF-QT', extract(year FROM q.created)::int,
+                           row_number() OVER (PARTITION BY extract(year FROM q.created) ORDER BY m.i)),
        1 + (lab.rnd(m.i, 123) < 0.2)::int,
        lab.uid('rfq', m.i),
        CASE WHEN NOT m.web THEN lab.uid('org', m.org) END,
@@ -327,8 +327,8 @@ INSERT INTO orders (id, "orderNumber", "userId", status, "totalAmount", currency
                     "paymentStatus", "purchaseOrderNumber", subtotal, "trackingReference",
                     "vatAmount", "vatRateBps")
 SELECT lab.uid('order', o.i),
-       'TF-SO-' || extract(year FROM o.created)::int || '-'
-           || lpad((row_number() OVER (PARTITION BY extract(year FROM o.created) ORDER BY o.i))::text, 6, '0'),
+       lab.document_number('TF-SO', extract(year FROM o.created)::int,
+                           row_number() OVER (PARTITION BY extract(year FROM o.created) ORDER BY o.i)),
        CASE WHEN o.b2b THEN lab.uid('user', lab.member_user(o.org, 1 + floor(5 * lab.rnd(o.i, 9))::int))
             ELSE lab.uid('user', lab.retail_user(o.retail, :n_orgs)) END,
        o.status::"OrderStatus",
