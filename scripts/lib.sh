@@ -110,11 +110,18 @@ primary_host() {
 # Naming the host avoids libpq resolving a node that is not running (seconds per connection).
 runner() { compose exec -T -e PGHOST="$(primary_host)" -e PGPORT=5432 runner "$@"; }
 
-# One-line description of where the lab runs, printed at the top of generated reports.
+# A setting as Compose resolves it: the shell's value wins over .env, then the default.
+lab_setting() {
+  local key=$1 default=$2
+  if [ -n "${!key:-}" ]; then printf '%s' "${!key}"; else env_value "$key" "$default"; fi
+}
+
+# One-line description of where the lab runs, printed at the top of generated reports: the
+# Docker host, every container memory limit and the server's memory settings.
 # LAB_ENVIRONMENT_NOTE (optional, from the shell) adds context such as "machine shared with
 # other workloads".
 lab_environment() {
-  local info docker os
+  local info docker os build
   info=$(docker info --format '{{.OperatingSystem}}|{{.ServerVersion}}|{{.NCPU}}|{{.MemTotal}}' 2>/dev/null || true)
   if [ -n "$info" ]; then
     docker=$(printf '%s' "$info" | awk -F'|' '{ printf "%s (Docker %s), %s CPUs and %.1f GiB of memory for all containers", $1, $2, $3, $4 / 1073741824 }')
@@ -122,12 +129,24 @@ lab_environment() {
     docker="Docker (details unavailable)"
   fi
   case $(uname -s 2>/dev/null) in
-    MINGW* | MSYS*) os="Windows NT $(uname -s | sed -e 's/^[A-Z0-9]*_NT-//' -e 's/-/ build /') (Git Bash)" ;;
+    MINGW* | MSYS*)
+      # uname -s reads MINGW64_NT-10.0-26200: Windows 11 reports NT 10.0 too, from build 22000.
+      build=$(uname -s | sed -e 's/^.*-//')
+      if [[ $build =~ ^[0-9]+$ ]] && ((build >= 22000)); then
+        os="Windows 11 build $build (Git Bash)"
+      else
+        os="Windows NT $(uname -s | sed -e 's/^[A-Z0-9]*_NT-//' -e 's/-/ build /') (Git Bash)"
+      fi
+      ;;
     Darwin) os="macOS $(sw_vers -productVersion 2>/dev/null)" ;;
     *) os="$(uname -sr 2>/dev/null)" ;;
   esac
-  printf '%s on %s; pg1 limited to %s with shared_buffers %s' \
-    "$docker" "$os" "$(env_value LAB_PG_MEM_LIMIT 1g)" "$(env_value LAB_SHARED_BUFFERS 256MB)"
+  printf '%s on %s; memory limits pg1 %s, pg2 %s, runner %s; shared_buffers %s, ' \
+    "$docker" "$os" "$(lab_setting LAB_PG_MEM_LIMIT 1g)" "$(lab_setting LAB_PG2_MEM_LIMIT 768m)" \
+    "$(lab_setting LAB_RUNNER_MEM_LIMIT 512m)" "$(lab_setting LAB_SHARED_BUFFERS 256MB)"
+  printf 'effective_cache_size %s, maintenance_work_mem %s, work_mem %s' \
+    "$(lab_setting LAB_EFFECTIVE_CACHE_SIZE 768MB)" "$(lab_setting LAB_MAINTENANCE_WORK_MEM 128MB)" \
+    "$(lab_setting LAB_WORK_MEM 8MB)"
   if [ -n "${LAB_ENVIRONMENT_NOTE:-}" ]; then printf '; %s' "$LAB_ENVIRONMENT_NOTE"; fi
 }
 
