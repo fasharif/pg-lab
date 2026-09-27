@@ -63,12 +63,22 @@ behind as a dead tuple for vacuum.
 ./lab partition-maintain --ahead 4 --retain 12 --as-of 2026-10-01
 ```
 
-1. `part.create_monthly_partitions(parent, from, to)` creates the missing months (idempotent).
-2. `part.partitions_to_detach(parent, retain, as_of)` lists partitions whose whole range is older
+1. First it finishes what an interrupted run left. `DETACH ... CONCURRENTLY` commits in two
+   steps; cancelled between them, it leaves the partition "detach pending"
+   (`pg_inherits.inhdetachpending`), and every later detach of it fails until
+   `ALTER TABLE ... DETACH PARTITION ... FINALIZE` completes it. The command runs `FINALIZE` for
+   such partitions, then moves to `part_archive` any detached table still in schema `part` (a
+   run that stopped between the detach and the move).
+2. `part.create_monthly_partitions(parent, from, to)` creates the missing months (idempotent).
+3. `part.partitions_to_detach(parent, retain, as_of)` lists partitions whose whole range is older
    than the retention window.
-3. For each, `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY` (which cannot run inside a
+4. For each, `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY` (which cannot run inside a
    function or transaction, so the Python command issues it) and `SET SCHEMA part_archive`.
-4. `part.months_ready(parent, as_of)` must reach `--ahead`, or the command fails.
+5. `part.months_ready(parent, as_of)` must reach `--ahead`, or the command fails.
+
+`tests/integration/test_partition_maintenance.py` cancels a concurrent detach half-way (a
+statement timeout while another transaction still reads the table), leaves a detached table
+behind, and checks that the next run recovers both and that a run after that changes nothing.
 
 In production this would run daily from a scheduler (cron, a Kubernetes CronJob or pg_cron), and
 an alert on `months_ready` below two would catch a job that stopped running.

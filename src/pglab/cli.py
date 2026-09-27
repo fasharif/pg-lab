@@ -169,6 +169,8 @@ def cmd_partition(args: argparse.Namespace) -> int:
 def cmd_partition_maintain(args: argparse.Namespace) -> int:
     with connect(application_name="pglab-partition") as conn:
         result = partitioning.maintain(conn, ahead=args.ahead, retain=args.retain, as_of=args.as_of)
+    for name in result.recovered:
+        print(f"recovered {name} (left by an interrupted run; now in schema part_archive)")
     for name in result.created:
         print(f"created  {name}")
     for name in result.detached:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -313,11 +313,70 @@ class MaintenanceResult:
     created: list[str]
     detached: list[str]
     months_ready: dict[str, int]
+    # Left behind by an earlier run that was interrupted: detaches finished with FINALIZE,
+    # and detached partitions moved to part_archive.
+    recovered: list[str] = field(default_factory=list)
 
 
-def maintain(conn: Connection, *, ahead: int, retain: int, as_of: date | None) -> MaintenanceResult:
+# Partitions whose DETACH ... CONCURRENTLY was cancelled or interrupted: still listed in
+# pg_inherits, marked pending. Every later plain or concurrent DETACH of them fails until
+# ALTER TABLE ... DETACH PARTITION ... FINALIZE completes it.
+PENDING_DETACH = """
+    SELECT i.inhrelid::regclass::text
+    FROM pg_inherits AS i
+    WHERE i.inhparent = %s::regclass AND i.inhdetachpending
+    ORDER BY 1
+"""
+
+# Tables that look like one of the parent's partitions (<table>_pYYYY_MM, same schema) but are
+# no longer attached: a run that failed between DETACH and SET SCHEMA part_archive.
+STRANDED = """
+    SELECT c.oid::regclass::text
+    FROM pg_class AS c
+    JOIN pg_class AS parent ON parent.oid = %s::regclass
+    WHERE c.relnamespace = parent.relnamespace
+      AND c.relkind = 'r'
+      AND NOT c.relispartition
+      AND c.relname ~ ('^' || parent.relname || '_p[0-9]{4}_[0-9]{2}$')
+    ORDER BY 1
+"""
+
+
+def _archive(conn: Connection, name: str) -> None:
+    conn.execute(f"ALTER TABLE {name} SET SCHEMA part_archive")
+
+
+def recover_interrupted(conn: Connection, parent: str) -> list[str]:
+    """Finish what an interrupted run left: pending detaches (FINALIZE), then detached tables
+    that never reached part_archive. Returns their names. Needs autocommit."""
+    recovered: list[str] = []
+    for (name,) in conn.execute(PENDING_DETACH, (parent,)).fetchall():
+        try:
+            conn.execute(f"ALTER TABLE {parent} DETACH PARTITION {name} FINALIZE")
+        except psycopg.Error as exc:
+            raise LabError(f"finishing the interrupted detach of {name} failed: {exc}") from exc
+        recovered.append(str(name))
+    for (name,) in conn.execute(STRANDED, (parent,)).fetchall():
+        try:
+            _archive(conn, name)
+        except psycopg.Error as exc:
+            raise LabError(f"moving the detached {name} to part_archive failed: {exc}") from exc
+        if name not in recovered:
+            recovered.append(str(name))
+    return recovered
+
+
+def maintain(
+    conn: Connection,
+    *,
+    ahead: int,
+    retain: int,
+    as_of: date | None,
+    parents: Sequence[str] = PARENTS,
+) -> MaintenanceResult:
     """Create partitions up to `ahead` months after as_of and detach those older than
-    `retain` full months. DETACH ... CONCURRENTLY needs autocommit (no transaction block)."""
+    `retain` full months, after finishing whatever an interrupted run left behind.
+    DETACH ... CONCURRENTLY needs autocommit (no transaction block)."""
     if ahead < 1 or retain < 1:
         raise LabError("--ahead and --retain must be at least 1")
     if as_of is None:
@@ -327,8 +386,10 @@ def maintain(conn: Connection, *, ahead: int, retain: int, as_of: date | None) -
         as_of = anchor.date()
     created: list[str] = []
     detached: list[str] = []
+    recovered: list[str] = []
     ready: dict[str, int] = {}
-    for parent in PARENTS:
+    for parent in parents:
+        recovered += recover_interrupted(conn, parent)
         rows = conn.execute(
             "SELECT part.create_monthly_partitions(%s::regclass, %s, %s)",
             (parent, as_of, add_months(as_of, ahead)),
@@ -341,7 +402,7 @@ def maintain(conn: Connection, *, ahead: int, retain: int, as_of: date | None) -
         for (name,) in old:
             try:
                 conn.execute(f"ALTER TABLE {parent} DETACH PARTITION {name} CONCURRENTLY")
-                conn.execute(f"ALTER TABLE {name} SET SCHEMA part_archive")
+                _archive(conn, name)
             except psycopg.Error as exc:
                 raise LabError(f"detaching {name} failed: {exc}") from exc
             detached.append(str(name))
@@ -350,7 +411,7 @@ def maintain(conn: Connection, *, ahead: int, retain: int, as_of: date | None) -
         )
         if ready[parent] < ahead:
             raise LabError(f"{parent}: only {ready[parent]} future months have partitions")
-    return MaintenanceResult(created, detached, ready)
+    return MaintenanceResult(created, detached, ready, recovered)
 
 
 def render_report(
