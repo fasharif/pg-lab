@@ -151,6 +151,8 @@ pitr_drill() {
   label=$(compose exec -T -u postgres "$primary" pgbackrest --stanza=topflow info |
     grep -oE '[0-9]{8}-[0-9]{6}F' | tail -n 1)
   record BACKUP_LABEL "$label"
+  # The PGDG package is not pinned (docs/pitr.md): the report says which version made the backup.
+  record PGBACKREST_VERSION "$(compose exec -T -u postgres "$primary" pgbackrest version | tr -d '\r')"
   record TIMELINE_BEFORE "$(node_query "$primary" 'SELECT timeline_id FROM pg_control_checkpoint()')"
 
   log "2/7 the application keeps writing (a heartbeat row every ${HEARTBEAT_INTERVAL}s)"
@@ -166,16 +168,16 @@ pitr_drill() {
     time)
       # What an operator has after an accident: the time just before it. The same statement
       # reads the newest heartbeat it can see, so every write up to that one committed before
-      # the recorded time. The WAL position read afterwards marks the writes that started
-      # later: their commit time can only be later still (src/pglab/drills.py).
+      # the recorded time. The WAL insert position, read in the same statement once the time
+      # is taken (the materialised CTE runs first), marks the writes that started later: their
+      # commit time can only be later still (src/pglab/drills.py).
       target=$(node_psql "$primary" -At -F '|' -c \
         "WITH t AS MATERIALIZED (
            SELECT (SELECT coalesce(max(seq), 0) FROM lab.heartbeat WHERE run_id = '$DRILL_ID')
                     AS last_seq,
                   clock_timestamp() AS at)
-         SELECT last_seq, at, extract(epoch FROM at) FROM t")
-      IFS='|' read -r last_seq target_time target_epoch <<<"$target"
-      target_lsn=$(node_query "$primary" 'SELECT pg_current_wal_insert_lsn()')
+         SELECT last_seq, at, extract(epoch FROM at), pg_current_wal_insert_lsn() FROM t")
+      IFS='|' read -r last_seq target_time target_epoch target_lsn <<<"$target"
       target_args=(--type=time "--target=$target_time")
       info "recovery target: time $target_time (WAL insert position $target_lsn right after it)"
       ;;

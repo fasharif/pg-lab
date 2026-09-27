@@ -277,7 +277,11 @@ def analyse_pitr(
         ),
     ]
     result.facts_table = [
-        ("Backup", f"full backup {facts.get('BACKUP_LABEL', '?')} (pgBackRest)"),
+        (
+            "Backup",
+            f"full backup {facts.get('BACKUP_LABEL', '?')} "
+            f"({facts.get('PGBACKREST_VERSION', 'pgBackRest')})",
+        ),
         ("Recovery target", words.description),
         ("Accident", "`DELETE FROM order_items` without a WHERE clause"),
         ("Restore", words.restore),

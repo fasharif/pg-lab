@@ -7,7 +7,8 @@ Files: `docker/postgres/pgbackrest.conf`, `docker/postgres/postgresql.conf` (arc
 
 ## Set-up
 
-- pgBackRest 2.59 (PGDG package) with one repository, a Docker volume mounted on both nodes at
+- pgBackRest 2.59 (PGDG package, not pinned to a build: each drill report records the version
+  that made the backup) with one repository, a Docker volume mounted on both nodes at
   `/var/lib/pgbackrest`. Stanza `topflow`, created when the cluster is initialised.
 - `archive_mode = on`, `archive_command = 'pgbackrest --stanza=topflow archive-push %p'`,
   `archive_timeout = 60s`: a busy primary archives at least once a minute.
@@ -28,7 +29,7 @@ the accident: exact, but a luxury that only a drill has. `./lab ci` runs both.
 | --- | --- |
 | 1 | Full backup (`pgbackrest --type=full backup`). |
 | 2 | A client starts writing a heartbeat row every 0.1 s (it keeps going until step 5). |
-| 3 | The drill fingerprints `order_items` (row count and the sum of 64-bit hashes of every row) and records the recovery target: the server's `clock_timestamp()` (default), or a named restore point (`pg_create_restore_point`). The same statement reads the newest heartbeat it can see; for a time target, the WAL insert position is read in the next statement. |
+| 3 | The drill fingerprints `order_items` (row count and the sum of 64-bit hashes of every row) and records the recovery target: the server's `clock_timestamp()` (default), or a named restore point (`pg_create_restore_point`). The same statement reads the newest heartbeat it can see and, for a time target, the WAL insert position once the time is taken. |
 | 4 | The accident: `DELETE FROM order_items`, every line of every order. |
 | 5 | `pg_switch_wal()`, then wait until `pg_stat_archiver` shows that segment archived; stop the client. |
 | 6 | Stop the primary, `pgbackrest restore --delta --type=time --target=<recorded time> --target-action=promote` (or `--type=name --target=<restore point>`), start it, wait until it has replayed to the target and promoted itself. |

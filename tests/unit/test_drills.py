@@ -296,6 +296,7 @@ PITR_TIME_FACTS = {
     **{k: v for k, v in PITR_FACTS.items() if k != "TARGET_NAME"},
     "TARGET_TYPE": "time",
     "TARGET_TIME": "2026-09-26 10:00:00.123456+00",
+    "PGBACKREST_VERSION": "pgBackRest 2.59.1",
 }
 
 
@@ -306,6 +307,7 @@ def test_pitr_to_a_recorded_time_uses_the_same_checks_and_names_the_time() -> No
     table = dict(result.facts_table)
     assert table["Recovery target"].startswith("time `2026-09-26 10:00:00.123456+00`")
     assert "--type=time --target=<recorded time>" in table["Restore"]
+    assert table["Backup"].endswith("(pgBackRest 2.59.1)")
     assert "every write committed before the recorded time is present" in [
         c.description for c in result.checks
     ]
