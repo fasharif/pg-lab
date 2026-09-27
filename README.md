@@ -17,16 +17,17 @@ and after its fix; every plan check also runs in CI.
 
 | # | Statement (from the TopFlow API) | Fix | Buffers before | Buffers after |
 | ---: | --- | --- | ---: | ---: |
-| 1 | Audit trail by action prefix, count | B-tree with `text_pattern_ops` | 33,618 | 14 |
+| 1 | Audit trail by action prefix, count | B-tree with `text_pattern_ops` | 33,618 | 15 |
 | 2 | Audit trail of one user, count | composite index of case 3 | 33,618 | 6 |
-| 3 | Audit trail of one user, first page | `(userId, createdAt)` | 23,110 | 24 |
-| 4 | Back-office order search | pg_trgm GIN indexes and a UNION rewrite | 11,640 | 758 |
+| 3 | Audit trail of one user, first page | `(userId, createdAt)` | 22,922 | 24 |
+| 4 | Back-office order search | pg_trgm GIN indexes and a UNION rewrite | 11,640 | 754 |
+| 4 | Back-office order search, pagination count | the same, the UNION counted | 11,626 | 358 |
 | 5 | Dashboard: eight newest orders | covering index of case 7 | 10,842 | 4 |
 | 6 | Dashboard: orders in the last 30 days | covering index of case 7 | 10,768 | 45 |
 | 7 | Dashboard: revenue of the last 30 days | `createdAt INCLUDE (status, totalAmount)` | 10,768 | 45 |
 | 8 | Order history of an organisation | `(organizationId, createdAt) INCLUDE (userId)` | 6,761 | 18 |
 | 9 | Category tree with product counts | partial index on visible products | 5,081 | 84 |
-| 10 | Quotations in one status | `(status, updatedAt)` replacing `(status)` | 4,977 | 7 |
+| 10 | Quotations in one status | `(status, updatedAt)` replacing `(status)` | 4,973 | 7 |
 
 Timings are **pending a measured run**: this machine was shared with other builds, so no
 duration measured on it is published (docs/benchmarking.md).

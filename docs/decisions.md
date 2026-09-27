@@ -154,15 +154,18 @@ own pool.
 **Alternatives.** The membership lookup inside the permissive policy (the first version) made the
 planner expect 26 of 9,943 rows and read every order of the organisation for one page. A
 transparent policy with inlined settings kept the index, but the planner applied the
-organisation's share twice and expected 251 rows; the bitmap plan cost less than 1% more than
-the index scan.
+organisation's share twice and expected 264 rows; the bitmap plan cost under 10% more than the
+index scan.
 
 **Consequences.** A user who claims an organisation they do not belong to sees nothing. The
 function gets a fixed default selectivity, so the estimate is a sixth of the real rows for every
-organisation: wrong, but predictably so, and the bitmap plan costs 74 times the index scan
-(`reports/rls-plans.md`). A function call per row costs CPU, which this functional run did not
-measure. Registering a trade account, accepting an invitation and KYC cross tenants and belong
-to the staff role in this model.
+organisation: wrong, but predictably so, and the bitmap plan costs 76 times the index scan
+(`reports/rls-plans.md`). The price is paid by a query that forgets its tenant filter: the
+function can never be an index condition, so such a query calls it for every row it reads (all
+200,000 orders at SCALE=1000000 to count one tenant's 9,943). The CPU this costs is measured
+only by `./lab rls-plans --measure`, which waits for the reference run; `topflow_app`'s 30 s
+statement timeout bounds a single query. Registering a trade account, accepting an invitation
+and KYC cross tenants and belong to the staff role in this model.
 
 The context is self-asserted: any `topflow_app` session can set `app.user_id` and `app.org_id`.
 The policies therefore protect against API queries that forget their tenant filter, not against

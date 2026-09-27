@@ -30,9 +30,9 @@ SELECT count(*) FROM orders AS o
 WHERE o."organizationId" = %(org_id)s
 """
 # The best plan without index scans must cost at least this many times the chosen one. With the
-# lab's policies `./lab rls-plans` gave a factor of 18.7 at SCALE=100000 (the CI data set) and 74
-# at SCALE=1000000 (reports/rls-plans.md); the transparent policy the docs argue against gave 2.2
-# and 1.0. A threshold of 10 tells the two designs apart at CI scale as well.
+# lab's policies `./lab rls-plans` gave a factor of 18.7 to 18.8 at SCALE=100000 (the CI data set)
+# and 76 at SCALE=1000000 (reports/rls-plans.md); the transparent policy the docs argue against
+# gave 2.2 and 1.1. A threshold of 10 tells the two designs apart at CI scale as well.
 MIN_COST_FACTOR = 10.0
 
 

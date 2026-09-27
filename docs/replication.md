@@ -5,9 +5,8 @@ Files: `docker/postgres/lab-entrypoint.sh` (clone on first start), `scripts/dril
 `src/pglab/drills.py` (analysis). Reports: `reports/switchover-drill-pg1-to-pg2.md` and
 `reports/switchover-drill-pg2-to-pg1.md` (one per direction), `reports/failover-drill.md`.
 
-The committed `reports/switchover-drill-pg2-to-pg1.md` is the second switchover of the
-regeneration run at SCALE=1000000 (2026-09-26), when every switchover wrote the same file and the
-first direction's report was overwritten; the next run writes both.
+The committed reports come from one regeneration run at SCALE=1000000 (2026-09-27): a
+switchover from pg1 to pg2, one back, then the failover drill.
 
 ## The standby
 

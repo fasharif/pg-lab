@@ -180,11 +180,15 @@ alternatives are applied in a transaction that is rolled back. From `reports/rls
 
 | Planned as | Estimated rows | Page | Cost without index scans | Total |
 | --- | ---: | --- | ---: | --- |
-| owner, no RLS | 9,627 | index scan, 18 buffers | 447x | index-only scan, 13 buffers |
-| lab policies | 1,604 | index scan, 21 buffers | 74x | index-only scan, 143 buffers |
-| lab policies, index without `userId` | 1,604 | index scan, 21 buffers | 74x | bitmap heap scan, 6,764 buffers |
-| transparent policy | 251 | index scan, 21 buffers | 1.0x | index-only scan, 143 buffers |
+| owner, no RLS | 9,907 | index scan, 18 buffers | 459x | index-only scan, 13 buffers |
+| lab policies | 1,651 | index scan, 21 buffers | 76x | index-only scan, 143 buffers |
+| lab policies, index without `userId` | 1,651 | index scan, 21 buffers | 77x | bitmap heap scan, 6,764 buffers |
+| transparent policy | 264 | index scan, 21 buffers | 1.1x | index-only scan, 143 buffers |
 | lookup inside the policy | 26 | bitmap heap scan and sort, 6,899 buffers | 1.0x | bitmap heap scan, 6,899 buffers |
+
+Estimates come from `ANALYZE`'s random sample, so they move by a few per cent from one run to the
+next on the same data (the lab policies' factor was between 74.8 and 76.3 in the three runs at
+this scale made for this page); the differences between the designs do not.
 
 *Cost without index scans* is the planner's cost for the best page plan it finds with index
 scans disabled, as a multiple of the chosen plan's cost: how far the page is from losing its
@@ -200,14 +204,14 @@ index. What each design does to the estimate:
   planning, so it knows the organisation, but it applies the organisation's share twice, once
   for the query's predicate and once for the policy's, as if they were independent. The largest
   organisation has 5% of the orders, so the estimate falls to 5% of the real count, and to half
-  of that for the membership gate: 251 rows. The smaller the organisation, the smaller the
-  fraction. The page keeps its index in this run, but only just: the bitmap plan costs 622
-  against 619 for the index scan, so a different statistics sample or a little more data can
+  of that for the membership gate: 264 rows. The smaller the organisation, the smaller the
+  fraction. The page keeps its index in this run, but only just: the bitmap plan costs 652
+  against 601 for the index scan, so a different statistics sample or a little more data can
   tip it.
 - **Tenant-row function**, the lab's design. PL/pgSQL functions are never inlined, so the
   planner uses its default selectivity for a boolean function, one third, and one half for the
   membership gate: it expects one sixth of the real rows whichever the organisation, and the
-  bitmap plan costs 74 times the index scan. The function is declared `COST 10`: with the
+  bitmap plan costs 76 times the index scan. The function is declared `COST 10`: with the
   default cost of 100 for non-C functions, the planner ran the organisation's count as a
   parallel index-only scan to share out the function calls.
 
@@ -224,8 +228,35 @@ fail if the page loses its index or has a sort, if the index scan's cost margin 
 factor of 10, if the total stops being an index-only scan, or if the page differs from the
 owner's. A separate test checks the design itself: the orders policy calls the PL/pgSQL
 `app.is_tenant_row`. The threshold of 10 separates the designs at CI scale too: at
-SCALE=100000, `./lab rls-plans` gave 18.7 for the lab's policies and 2.2 for the transparent
-policy.
+SCALE=100000, `./lab rls-plans` gave 18.7 and 18.8 in two runs for the lab's policies and 2.2
+for the transparent policy.
+
+### The price: a query that forgets its tenant filter
+
+The opaque function has a cost that the estimates do not show. PostgreSQL cannot turn
+`app.is_tenant_row(...)` into an index condition, so a query that forgets its tenant filter,
+the very case row-level security is there for, calls the function for every row it reads.
+`./lab rls-plans` also runs `SELECT count(*) FROM orders`, with no `WHERE` clause, under each
+design (SCALE=1000000, same report):
+
+| Planned as | Orders read | Orders counted | Buffers |
+| --- | ---: | ---: | ---: |
+| lab policies | 199,999 | 9,943 | 2,670 |
+| transparent policy | 199,999 | 9,943 | 2,400 |
+| lookup inside the policy | 9,943 | 9,943 | 6,843 |
+
+(The table has 200,000 orders; the parallel scans report per-worker averages, which round to
+199,999.) Every design returns the tenant's 9,943 orders and nothing else. The lab's design
+reads all 200,000 and calls its PL/pgSQL function once for each, about two million calls at the
+10M target. The transparent policy reads the same rows here, because the planner prefers one
+index-only scan with a filter to combining two index conditions, but its test is inline SQL, not
+a function call. Only the membership lookup reads just the tenant's rows, because its
+subquery's value is known when the scan starts, and that is what made the planner misjudge the
+page. So the lab trades CPU on forgotten filters for stable plans on the queries the API
+actually sends. How much CPU is the one number still missing: `./lab rls-plans --measure` times
+all three statements under each design, and it is part of the reference measurement
+(docs/benchmarking.md). `topflow_app`'s `statement_timeout` of 30 s bounds the damage of any one
+such query.
 
 ## Limitations
 

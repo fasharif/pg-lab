@@ -1,7 +1,7 @@
 # Indexing strategy
 
 What to index in TopFlow's database, what not to, and what each index costs on writes. Figures
-come from `reports/indexing.md` (`./lab indexing`, SCALE=1000000, PostgreSQL 18.6, 2026-09-26)
+come from `reports/indexing.md` (`./lab indexing`, SCALE=1000000, PostgreSQL 18.6, 2026-09-27)
 unless a section gives its own command. Sizes are of freshly built indexes.
 
 ## Start from the statements, not the columns

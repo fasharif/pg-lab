@@ -67,10 +67,9 @@ the archived WAL with `pg_waldump`, then restore with `--type=xid --target-exclu
 stops just before its commit and keeps the writes that committed while the `DELETE` ran. The
 drill does not script that yet (README, roadmap).
 
-The committed `reports/pitr-drill-name.md` comes from the regeneration run at SCALE=1000000
-(2026-09-26 03:37 UTC), made before the drill gained `--target`, when `./lab pitr-drill` always
-restored to a restore point. The time-target report, `reports/pitr-drill.md`, is written by the
-next run; `./lab ci` runs both targets.
+Both committed reports come from one regeneration run at SCALE=1000000 (2026-09-27): each
+drill deleted and restored 1,001,547 order lines with an identical checksum and lost none of the
+acknowledged writes made before its target.
 
 ## RTO and data loss
 
