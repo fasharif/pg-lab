@@ -149,14 +149,17 @@ cmd_migrate() {
 cmd_seed() {
   require_env
   local scale
-  scale=$(env_value LAB_SCALE 100000)
+  # A LAB_SCALE set in the shell (as the CI workflow does) wins over the one in .env.
+  scale=${LAB_SCALE:-$(env_value LAB_SCALE 100000)}
   while [ $# -gt 0 ]; do
     case $1 in
       --scale) scale=${2:?--scale needs a number}; shift 2 ;;
       *) die "seed: unknown option $1" ;;
     esac
   done
-  [[ $scale =~ ^[0-9]+$ ]] || die "seed: --scale must be a whole number (got '$scale')"
+  if ! [[ $scale =~ ^[0-9]{1,9}$ ]] || ((10#$scale < 1000 || 10#$scale > 100000000)); then
+    die "seed: --scale must be a whole number from 1000 to 100000000 (got '$scale')"
+  fi
   ensure_runner
   log "generating data at SCALE=$scale (about $scale order lines)"
   runner psql -X -v ON_ERROR_STOP=1 -v scale="$scale" -f sql/generate/generate.sql

@@ -19,11 +19,13 @@ SET ROLE topflow_owner;
 SET synchronous_commit = off;
 SET work_mem = '64MB';
 
-SELECT CASE WHEN :scale::bigint BETWEEN 1000 AND 100000000 THEN true END AS scale_ok \gset
+-- Checked before anything is deleted; ./lab seed checks the range first as well.
+SELECT CASE WHEN v.s ~ '^[0-9]{1,9}$' THEN v.s::bigint BETWEEN 1000 AND 100000000 ELSE false END
+           AS scale_ok
+FROM (SELECT :'scale'::text AS s) AS v \gset
 \if :scale_ok
 \else
-  \warn 'generate.sql: scale must be between 1000 and 100000000'
-  SELECT 1 / 0 AS scale_out_of_range;
+  DO $$ BEGIN RAISE EXCEPTION 'generate.sql: scale must be a whole number from 1000 to 100000000'; END $$;
 \endif
 
 \echo '== resetting tables and dropping secondary indexes and foreign keys'
