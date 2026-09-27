@@ -23,10 +23,10 @@ import psycopg
 from psycopg import sql
 
 from pglab.db import Connection
-from pglab.definitions import Case
+from pglab.definitions import Case, Total
 from pglab.errors import LabError
 from pglab.execute import Timing, explain_json, explain_text, measure, render, resolve_params
-from pglab.explain import Plan, check_plan, format_blocks
+from pglab.explain import Expectation, Plan, check_plan, format_blocks
 from pglab.report import RunInfo, code, ms, table
 
 CREATE_INDEX = re.compile(
@@ -76,18 +76,24 @@ class Equivalence:
     def describe(self) -> str:
         if self.same:
             return (
-                f"the rewrite returns the same {self.rewrite_rows:,} rows as the original "
+                f"the rewrite returns the same {_rows(self.rewrite_rows)} as the original "
                 "statement, in the same order"
             )
         return (
             "the rewrite does not return the same rows in the same order as the original "
-            f"statement ({self.rewrite_rows:,} rows against {self.original_rows:,})"
+            f"statement ({_rows(self.rewrite_rows)} against {self.original_rows:,})"
         )
 
 
+def _rows(count: int) -> str:
+    return f"{count:,} row" if count == 1 else f"{count:,} rows"
+
+
 @dataclass(frozen=True)
-class CaseResult:
-    case: Case
+class TotalResult:
+    """The page's pagination count, before and after the same case's fix."""
+
+    total: Total
     params: dict[str, Any]
     before: Snapshot
     after: Snapshot
@@ -99,6 +105,25 @@ class CaseResult:
             not self.before.failures
             and not self.after.failures
             and (self.equivalence is None or self.equivalence.same)
+        )
+
+
+@dataclass(frozen=True)
+class CaseResult:
+    case: Case
+    params: dict[str, Any]
+    before: Snapshot
+    after: Snapshot
+    equivalence: Equivalence | None = None
+    total: TotalResult | None = None
+
+    @property
+    def passed(self) -> bool:
+        return (
+            not self.before.failures
+            and not self.after.failures
+            and (self.equivalence is None or self.equivalence.same)
+            and (self.total is None or self.total.passed)
         )
 
 
@@ -181,20 +206,26 @@ def apply_all(conn: Connection, cases: Sequence[Case]) -> None:
     analyze(conn)
 
 
-def compare_rewrite(conn: Connection, case: Case, params: dict[str, Any]) -> Equivalence:
+def compare_rewrite(
+    conn: Connection, original_sql: str, rewritten_sql: str, params: dict[str, Any]
+) -> Equivalence:
     """Run the original statement and its rewrite; both must return the same rows in order."""
-    original = conn.execute(render(conn, case.query.sql, params)).fetchall()
-    rewritten = conn.execute(render(conn, case.after_sql, params)).fetchall()
+    original = conn.execute(render(conn, original_sql, params)).fetchall()
+    rewritten = conn.execute(render(conn, rewritten_sql, params)).fetchall()
     return Equivalence(len(original), len(rewritten), original == rewritten)
 
 
 def _snapshot(
-    conn: Connection, sql: str, values: dict[str, Any], case: Case, *, after: bool, runs: int | None
+    conn: Connection,
+    sql: str,
+    values: dict[str, Any],
+    expectation: Expectation,
+    *,
+    runs: int | None,
 ) -> Snapshot:
     statement = render(conn, sql, values)
     plan = explain_json(conn, statement)
     text = explain_text(conn, statement)
-    expectation = case.after if after else case.before
     failures = tuple(check_plan(plan, expectation))
     timing = measure(conn, statement, runs) if runs else None
     return Snapshot(statement, plan, text, failures, timing)
@@ -203,19 +234,45 @@ def _snapshot(
 def run_casebook(conn: Connection, cases: Sequence[Case], *, runs: int | None) -> list[CaseResult]:
     revert_all(conn, cases)
     params: dict[int, dict[str, Any]] = {}
+    total_params: dict[int, dict[str, Any]] = {}
     befores: dict[int, Snapshot] = {}
+    total_befores: dict[int, Snapshot] = {}
     for case in cases:
         params[case.number] = resolve_params(conn, case.query.params)
         befores[case.number] = _snapshot(
-            conn, case.query.sql, params[case.number], case, after=False, runs=runs
+            conn, case.query.sql, params[case.number], case.before, runs=runs
         )
+        if case.total is not None:
+            total_params[case.number] = resolve_params(conn, case.total.query.params)
+            total_befores[case.number] = _snapshot(
+                conn,
+                case.total.query.sql,
+                total_params[case.number],
+                case.total.before,
+                runs=runs,
+            )
     apply_all(conn, cases)
     results = []
     for case in cases:
-        after = _snapshot(conn, case.after_sql, params[case.number], case, after=True, runs=runs)
-        equivalence = compare_rewrite(conn, case, params[case.number]) if case.rewrite else None
+        values = params[case.number]
+        after = _snapshot(conn, case.after_sql, values, case.after, runs=runs)
+        equivalence = (
+            compare_rewrite(conn, case.query.sql, case.after_sql, values) if case.rewrite else None
+        )
+        total_result = None
+        if case.total is not None:
+            total, total_values = case.total, total_params[case.number]
+            total_result = TotalResult(
+                total,
+                total_values,
+                total_befores[case.number],
+                _snapshot(conn, total.after_sql, total_values, total.after, runs=runs),
+                compare_rewrite(conn, total.query.sql, total.after_sql, total_values)
+                if total.rewrite
+                else None,
+            )
         results.append(
-            CaseResult(case, params[case.number], befores[case.number], after, equivalence)
+            CaseResult(case, values, befores[case.number], after, equivalence, total_result)
         )
     return results
 
@@ -224,11 +281,17 @@ def _check_cell(snapshot: Snapshot) -> str:
     return "fail" if snapshot.failures else "pass"
 
 
-def _expectation_lines(result: CaseResult) -> list[str]:
+def _expectation_lines(
+    before: Snapshot,
+    after: Snapshot,
+    expected_before: Expectation,
+    expected_after: Expectation,
+    equivalence: Equivalence | None,
+) -> list[str]:
     lines = []
     for label, snapshot, expectation in (
-        ("Before", result.before, result.case.before),
-        ("After", result.after, result.case.after),
+        ("Before", before, expected_before),
+        ("After", after, expected_after),
     ):
         described = expectation.describe()
         if not described:
@@ -236,34 +299,93 @@ def _expectation_lines(result: CaseResult) -> list[str]:
         status = "passed" if not snapshot.failures else "FAILED"
         lines.append(f"- {label} ({status}): " + "; ".join(described) + ".")
         lines.extend(f"  - {failure}" for failure in snapshot.failures)
-    if result.equivalence is not None:
-        status = "passed" if result.equivalence.same else "FAILED"
-        lines.append(f"- Rewrite ({status}): {result.equivalence.describe()}.")
+    if equivalence is not None:
+        status = "passed" if equivalence.same else "FAILED"
+        lines.append(f"- Rewrite ({status}): {equivalence.describe()}.")
     return lines
+
+
+def _comparison(before: Snapshot, after: Snapshot) -> str:
+    return table(
+        ["", "Before", "After"],
+        [
+            (
+                "Shared buffers",
+                format_blocks(before.plan.shared_buffers()),
+                format_blocks(after.plan.shared_buffers()),
+            ),
+            (
+                "Rows returned",
+                f"{before.plan.rows() or 0:,.0f}",
+                f"{after.plan.rows() or 0:,.0f}",
+            ),
+            (
+                "Median time",
+                ms(before.timing.median_ms if before.timing else None),
+                ms(after.timing.median_ms if after.timing else None),
+            ),
+            ("Plan checks", _check_cell(before), _check_cell(after)),
+        ],
+        "lrr",
+    )
+
+
+def _summary_row(
+    number: int, link: str, fix: str, *, before: Snapshot, after: Snapshot, passed: bool
+) -> tuple[object, ...]:
+    return (
+        number,
+        link,
+        fix,
+        format_blocks(before.plan.shared_buffers()),
+        format_blocks(after.plan.shared_buffers()),
+        ms(before.timing.median_ms if before.timing else None),
+        ms(after.timing.median_ms if after.timing else None),
+        "pass" if passed else "FAIL",
+    )
 
 
 def render_report(results: Sequence[CaseResult], info: RunInfo, *, command: str) -> str:
     summary_rows = []
     for r in results:
+        page_passed = (
+            not r.before.failures
+            and not r.after.failures
+            and (r.equivalence is None or r.equivalence.same)
+        )
         summary_rows.append(
-            (
+            _summary_row(
                 r.case.number,
                 f"[{r.case.title}](#{_anchor(r.case)})",
                 r.case.fix_kind,
-                format_blocks(r.before.plan.shared_buffers()),
-                format_blocks(r.after.plan.shared_buffers()),
-                ms(r.before.timing.median_ms if r.before.timing else None),
-                ms(r.after.timing.median_ms if r.after.timing else None),
-                "pass" if r.passed else "FAIL",
+                before=r.before,
+                after=r.after,
+                passed=page_passed,
             )
         )
+        if r.total is not None:
+            summary_rows.append(
+                _summary_row(
+                    r.case.number,
+                    f"[{r.total.total.query.title}](#{_anchor(r.case)}-total)",
+                    "same fix as the page"
+                    + (", rewritten to count the matches" if r.total.total.rewrite else ""),
+                    before=r.total.before,
+                    after=r.total.after,
+                    passed=r.total.passed,
+                )
+            )
     out = [
         "# Performance casebook",
         "",
-        "The ten heaviest statements of the TopFlow API workload by shared buffers touched (see",
-        "`reports/workload.md`), each with its plan before and after the fix. Plans come from",
-        "`EXPLAIN (ANALYZE, BUFFERS)`; CI checks the plan shape of every case (indexes used, nodes",
-        "present) and that a rewritten statement returns the same rows, never timings.",
+        "The heaviest statements of the TopFlow API workload by shared buffers touched, chosen",
+        "from the ranking at SCALE=1000000 (`reports/workload.md`), each with its plan before and",
+        "after the fix. Buffers stand in for time until the measured run, which ranks the workload",
+        "by median time (docs/benchmarking.md). A list endpoint runs its pagination total with its",
+        "page and the same filter, so a total that is among the heaviest statements is fixed in",
+        "its page's case. Plans come from `EXPLAIN (ANALYZE, BUFFERS)`; CI checks the plan shape",
+        "of every case (indexes used, nodes present) and that a rewritten statement returns the",
+        "same rows, never timings.",
         "",
         *info.header_lines(command),
         "",
@@ -332,34 +454,49 @@ def _case_section(r: CaseResult) -> list[str]:
         "",
         code(r.after.text, "text"),
         "",
-        table(
-            ["", "Before", "After"],
-            [
-                (
-                    "Shared buffers",
-                    format_blocks(r.before.plan.shared_buffers()),
-                    format_blocks(r.after.plan.shared_buffers()),
-                ),
-                (
-                    "Rows returned",
-                    f"{r.before.plan.rows() or 0:,.0f}",
-                    f"{r.after.plan.rows() or 0:,.0f}",
-                ),
-                (
-                    "Median time",
-                    ms(r.before.timing.median_ms if r.before.timing else None),
-                    ms(r.after.timing.median_ms if r.after.timing else None),
-                ),
-                ("Plan checks", _check_cell(r.before), _check_cell(r.after)),
-            ],
-            "lrr",
-        ),
+        _comparison(r.before, r.after),
         "",
-        *_expectation_lines(r),
+        *_expectation_lines(r.before, r.after, case.before, case.after, r.equivalence),
         "",
+    ]
+    if r.total is not None:
+        lines += _total_section(r, r.total)
+    lines += [
         "### Trade-off",
         "",
         case.tradeoff,
+        "",
+    ]
+    return lines
+
+
+def _total_section(r: CaseResult, t: TotalResult) -> list[str]:
+    query = t.total.query
+    lines = [
+        f'<a id="{_anchor(r.case)}-total"></a>',
+        "",
+        "### The pagination total",
+        "",
+        f"The endpoint also counts every match for its pager: `{query.api}` (workload id "
+        f"`{query.id}`), with the same filter as the page and the same fix.",
+        "",
+        "Before:",
+        "",
+        code(t.before.statement, "sql"),
+        "",
+        code(t.before.text, "text"),
+        "",
+    ]
+    if t.total.rewrite:
+        lines += ["Rewritten:", "", code(t.after.statement, "sql"), ""]
+    lines += [
+        "After:",
+        "",
+        code(t.after.text, "text"),
+        "",
+        _comparison(t.before, t.after),
+        "",
+        *_expectation_lines(t.before, t.after, t.total.before, t.total.after, t.equivalence),
         "",
     ]
     return lines

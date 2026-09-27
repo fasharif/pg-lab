@@ -80,7 +80,10 @@ committed reports says "pending a measured run" (docs/benchmarking.md).
 **Decision.** Each case is a TOML file: the workload query, the fix as separate statements, the
 revert, an optional rewrite and the expected plan before and after (indexes used, nodes present
 or absent, sequential scans). Index fixes use `CREATE INDEX CONCURRENTLY IF NOT EXISTS`. When one
-index fixes several statements, the other cases say `fixed_by` instead of repeating it.
+index fixes several statements, the other cases say `fixed_by` instead of repeating it. A case
+can also hold its page's pagination total (`[total]`, with its own expectations and rewrite):
+TopFlow's list endpoints run the page and a count with the same filter, and fixing one without
+the other leaves the endpoint as slow as before.
 
 **Consequences.** A regression that changes a plan fails CI at SCALE=100000; the same checks pass
 at SCALE=1000000. Checks cannot prove a fix is fast enough, which is what the measured run is for.

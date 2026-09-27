@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from pglab.casebook import CREATE_INDEX, statement_tag
-from pglab.definitions import WorkloadQuery
+from pglab import casebook
+from pglab.casebook import (
+    CREATE_INDEX,
+    CaseResult,
+    Equivalence,
+    Snapshot,
+    TotalResult,
+    statement_tag,
+)
+from pglab.definitions import Case, WorkloadQuery, load_cases, load_workload
 from pglab.execute import Timing, is_timing_line
+from pglab.explain import check_plan
 from pglab.indexing import human_bytes
 from pglab.report import PENDING, RunInfo, code, ms, table, timing_cell
-from pglab.workload import WorkloadResult, rank, render_report
+from pglab.workload import WorkloadResult, casebook_labels, rank, render_report
 from tests.conftest import load_plan
 
 
@@ -84,15 +95,72 @@ def test_ranking_puts_the_most_buffers_first() -> None:
 
 def test_workload_report_marks_casebook_entries() -> None:
     text = render_report(
-        [_result("large", "orders-org-history.before")],
+        [
+            _result("large", "orders-org-history.before"),
+            _result("large-count", "orders-org-history.after"),
+        ],
         info(),
         command="./lab workload",
-        casebook_queries={"large": 8},
+        casebook_queries={"large": "case 8", "large-count": "case 8 (total)"},
         state="baseline",
     )
     assert "| 1 | `large` |" in text
-    assert "case 8" in text
+    assert "| case 8 |" in text
+    assert "| case 8 (total) |" in text
+    assert "ranked by the shared buffers" in text
     assert PENDING in text
+
+
+def _cases(root: Path) -> list[Case]:
+    return load_cases(root / "casebook", load_workload(root / "workload" / "queries.toml"))
+
+
+def test_casebook_labels_mark_the_pagination_total(root: Path) -> None:
+    labels = casebook_labels(_cases(root))
+    assert labels["orders-admin-search"] == "case 4"
+    assert labels["orders-admin-search-count"] == "case 4 (total)"
+    assert labels["catalogue-categories"] == "case 9"
+
+
+def _snapshot(plan_name: str, failures: tuple[str, ...] = ()) -> Snapshot:
+    return Snapshot("SELECT 1", load_plan(plan_name), "plan text", failures, None)
+
+
+def test_casebook_report_shows_a_total_in_its_case(root: Path) -> None:
+    case = _cases(root)[3]
+    assert case.total is not None
+    before, after = _snapshot("orders-admin-search.before"), _snapshot("orders-admin-search.after")
+    total = TotalResult(case.total, {}, before, after, Equivalence(1, 1, same=True))
+    result = CaseResult(case, {}, before, after, Equivalence(20, 20, same=True), total)
+    assert result.passed
+    text = casebook.render_report([result], info(), command="./lab casebook")
+    assert '<a id="case-04-total"></a>' in text
+    assert "### The pagination total" in text
+    assert "(#case-04-total) | same fix as the page, rewritten to count the matches |" in text
+    assert "the rewrite returns the same 1 row as" in text
+    # A failing total fails its case, and only its own row in the summary.
+    broken = TotalResult(case.total, {}, before, _snapshot("orders-admin-search.after", ("x",)))
+    failed = CaseResult(case, {}, before, after, Equivalence(20, 20, same=True), broken)
+    assert not failed.passed
+    rows = [
+        line
+        for line in casebook.render_report([failed], info(), command="x").splitlines()
+        if line.startswith("| 4 |")
+    ]
+    assert [row.endswith("| pass |") for row in rows] == [True, False]
+
+
+def test_the_total_expectations_of_case_4_hold_on_recorded_plans(root: Path) -> None:
+    case = _cases(root)[3]
+    assert case.total is not None
+    before = load_plan("orders-admin-search-count.before")
+    after = load_plan("orders-admin-search-count.after")
+    indexes_only = load_plan("orders-admin-search-count.tuned-without-rewrite")
+    assert check_plan(before, case.total.before) == []
+    assert check_plan(after, case.total.after) == []
+    # With the trigram indexes but without the rewrite, the count still reads every order.
+    assert "orders" in indexes_only.seq_scanned()
+    assert check_plan(indexes_only, case.total.after) != []
 
 
 def test_index_names_are_extracted_from_fix_statements() -> None:

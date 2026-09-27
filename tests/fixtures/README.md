@@ -9,6 +9,11 @@ indexes) and `<workload id>.after.json` the tuned schema. Keys holding durations
 were removed when recording, so the files contain plan shape, row counts and buffer counts
 only. The unit tests use them to check plan parsing and the plan checks without a database.
 
+`orders-admin-search-count.*.json` are case 4's pagination total, recorded the same way at
+SCALE=1000000 on 2026-09-27: `before` is the count on the baseline schema,
+`tuned-without-rewrite` the same count with the casebook's indexes, and `after` the rewritten
+count on the tuned schema.
+
 ## exporter-metric-names.txt
 
 Metric names exposed by postgres_exporter v0.20.1 against a lab node, used to check that

@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from pglab.db import Connection
-from pglab.definitions import WorkloadQuery
+from pglab.definitions import Case, WorkloadQuery
 from pglab.execute import Timing, explain_json, measure, render, resolve_params
 from pglab.explain import Plan, format_blocks, summarise
 from pglab.report import RunInfo, ms, table
@@ -38,6 +38,16 @@ def run_workload(
     return results
 
 
+def casebook_labels(cases: Sequence[Case]) -> dict[str, str]:
+    """Casebook column of the ranking: 'case 4' for a case's statement, 'case 4 (total)' for
+    the pagination total fixed in the same case."""
+    labels = {case.query.id: f"case {case.number}" for case in cases}
+    for case in cases:
+        if case.total is not None:
+            labels[case.total.query.id] = f"case {case.number} (total)"
+    return labels
+
+
 def rank(results: Sequence[WorkloadResult]) -> list[WorkloadResult]:
     """Most work first: shared buffers, then temporary buffers, then id for stable output."""
     return sorted(
@@ -51,7 +61,7 @@ def render_report(
     info: RunInfo,
     *,
     command: str,
-    casebook_queries: Mapping[str, int],
+    casebook_queries: Mapping[str, str],
     state: str,
 ) -> str:
     ranked = rank(results)
@@ -67,7 +77,7 @@ def render_report(
                 format_blocks(result.plan.shared_buffers()),
                 summarise(result.plan),
                 ms(result.timing.median_ms if result.timing else None),
-                f"case {case}" if case else "",
+                case or "",
             )
         )
     lines = [
@@ -94,8 +104,9 @@ def render_report(
             "rllrrllr",
         ),
         "",
-        "The casebook (`reports/casebook.md`) takes the ten statements at the top of this",
-        "ranking at the reference scale and fixes them. Regenerate with `./lab workload`.",
+        "The casebook (`reports/casebook.md`) was chosen from the top of this ranking at",
+        "SCALE=1000000, the reference scale: one case per statement, except that a pagination",
+        "total is fixed in its page's case (marked total). Regenerate with `./lab workload`.",
         "",
     ]
     return "\n".join(lines)

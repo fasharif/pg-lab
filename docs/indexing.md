@@ -8,8 +8,8 @@ unless a section gives its own command. Sizes are of freshly built indexes.
 
 Every index in the lab answers a statement the API sends (`workload/queries.toml`); nothing is
 indexed because a column "looks important". The workload ranking (`reports/workload.md`) shows
-which statements do the most work, and the casebook fixes the top ten. The rules that came out of
-it:
+which statements do the most work, and the casebook fixes the heaviest of them (ten cases; case
+4 also fixes the search's pagination count). The rules that came out of it:
 
 1. **Equality columns first, then the column you sort or range on.** `(organizationId, createdAt)`
    returns an organisation's newest 20 orders from the index alone, whatever the size of its

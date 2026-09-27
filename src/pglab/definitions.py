@@ -33,6 +33,22 @@ class WorkloadQuery:
 
 
 @dataclass(frozen=True)
+class Total:
+    """The pagination count a list endpoint runs with its page. TopFlow's list() methods run
+    findMany and count with the same filter in one transaction, so a case that fixes the page
+    also has to fix the count, with the same indexes and, where needed, its own rewrite."""
+
+    query: WorkloadQuery
+    rewrite: str
+    before: Expectation
+    after: Expectation
+
+    @property
+    def after_sql(self) -> str:
+        return self.rewrite or self.query.sql
+
+
+@dataclass(frozen=True)
 class Case:
     number: int
     slug: str
@@ -47,6 +63,7 @@ class Case:
     before: Expectation
     after: Expectation
     path: Path
+    total: Total | None = None
 
     @property
     def title(self) -> str:
@@ -164,6 +181,7 @@ def load_cases(directory: Path, workload: Mapping[str, WorkloadQuery]) -> list[C
         after = Expectation.from_mapping(_table(data, "after", where), f"{where} [after]")
         if after.is_empty():
             raise LabError(f"{where}: [after] must state at least one plan check")
+        total = _total(data, where, workload) if "total" in data else None
         cases.append(
             Case(
                 number=number,
@@ -179,6 +197,7 @@ def load_cases(directory: Path, workload: Mapping[str, WorkloadQuery]) -> list[C
                 before=before,
                 after=after,
                 path=path,
+                total=total,
             )
         )
     by_number = {case.number: case for case in cases}
@@ -190,11 +209,34 @@ def load_cases(directory: Path, workload: Mapping[str, WorkloadQuery]) -> list[C
             raise LabError(
                 f"{case.path.name}: fixed_by = {case.fixed_by} must name another case with a fix"
             )
-    queries_seen = [case.query.id for case in cases]
+    queries_seen = [case.query.id for case in cases] + [
+        case.total.query.id for case in cases if case.total is not None
+    ]
     duplicates = {q for q in queries_seen if queries_seen.count(q) > 1}
     if duplicates:
         raise LabError(f"casebook: queries used by more than one case: {sorted(duplicates)}")
     return cases
+
+
+def _total(data: Mapping[str, Any], where: str, workload: Mapping[str, WorkloadQuery]) -> Total:
+    """The optional [total] table: the page's pagination count, checked in the same case."""
+    table = _table(data, "total", where)
+    where = f"{where} [total]"
+    unknown = set(table) - {"query", "rewrite", "before", "after"}
+    if unknown:
+        raise LabError(f"{where}: unknown keys {sorted(unknown)}")
+    query_id = _text(table, "query", where)
+    if query_id not in workload:
+        raise LabError(f"{where}: query {query_id!r} is not in the workload")
+    query = workload[query_id]
+    rewrite = _text(table, "rewrite", where, required=False)
+    if rewrite and not placeholders(rewrite) <= set(query.params):
+        raise LabError(f"{where}: the rewrite uses parameters the query does not define")
+    before = Expectation.from_mapping(_table(table, "before", where), f"{where} [before]")
+    after = Expectation.from_mapping(_table(table, "after", where), f"{where} [after]")
+    if after.is_empty():
+        raise LabError(f"{where}: [total.after] must state at least one plan check")
+    return Total(query=query, rewrite=rewrite, before=before, after=after)
 
 
 def _statements(data: Mapping[str, Any], key: str, where: str) -> tuple[str, ...]:

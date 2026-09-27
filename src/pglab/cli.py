@@ -77,7 +77,7 @@ def cmd_workload(args: argparse.Namespace) -> int:
         results,
         info,
         command=args.label,
-        casebook_queries={case.query.id: case.number for case in cases},
+        casebook_queries=workload.casebook_labels(cases),
         state=args.state,
     )
     _write(Path(args.output), text)
@@ -102,6 +102,17 @@ def cmd_casebook(args: argparse.Namespace) -> int:
             print(f"      before: {failure}")
         for failure in result.after.failures:
             print(f"      after:  {failure}")
+        if result.equivalence is not None and not result.equivalence.same:
+            print(f"      rewrite: {result.equivalence.describe()}")
+        if result.total is not None:
+            total = result.total
+            print(f"        total {total.total.query.id:<28} {'pass' if total.passed else 'FAIL'}")
+            for failure in total.before.failures:
+                print(f"      total before: {failure}")
+            for failure in total.after.failures:
+                print(f"      total after:  {failure}")
+            if total.equivalence is not None and not total.equivalence.same:
+                print(f"      total rewrite: {total.equivalence.describe()}")
         failed += 0 if result.passed else 1
     if failed:
         raise CheckError(f"{failed} casebook case(s) failed their plan checks")
