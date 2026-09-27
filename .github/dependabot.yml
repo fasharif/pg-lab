@@ -1,3 +1,6 @@
+# Not covered by Dependabot, bumped by hand: the tool images run with docker run in ./lab and
+# .github/workflows/ci.yml (prom/prometheus for promtool, koalaman/shellcheck,
+# rhysd/actionlint) and the apt packages installed in docker/postgres/Dockerfile.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -34,7 +37,9 @@ updates:
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker-compose
-    directory: /
+    directories:
+      - /
+      - /sqlserver
     schedule:
       interval: weekly
     commit-message:

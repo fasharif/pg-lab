@@ -8,9 +8,10 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its running checks; runs on main always finish.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   static:
@@ -47,8 +48,10 @@ jobs:
           uv run sqlfluff lint --dialect postgres --rules LT12 sql/lab sql/security sql/partitioning
           uv run sqlfluff lint --dialect tsql --rules LT12 sqlserver/sql
 
-      - name: Alert rules and their unit tests (promtool)
+      - name: Prometheus configuration, alert rules and their unit tests (promtool)
         run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p --entrypoint promtool \
+            prom/prometheus:v3.15.0 check config prometheus.yml
           docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p --entrypoint promtool \
             prom/prometheus:v3.15.0 check rules rules/postgres.yml
           docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p --entrypoint promtool \

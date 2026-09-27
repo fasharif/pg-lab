@@ -66,5 +66,10 @@ returns the left-hand value, so the alert text said the standby was "1s behind";
 puts the lag first. A unit test also checks that every metric used by the rules and the dashboard
 exists in the exporter's output (names recorded from the running exporters).
 
+What is not tested yet: a rule firing on the running stack. `./lab ci` starts the stack, runs
+pgbench for 10 seconds and checks that both nodes are scraped and the rules are loaded; the rules'
+`for` durations (up to 30 minutes) make a live firing test a drill of its own, for example
+stopping the standby until `PostgresReplicationSlotInactive` fires.
+
 No Alertmanager is configured: the alerts are visible in Prometheus and Grafana, and routing them
 (e-mail, chat, paging) is a deployment decision.

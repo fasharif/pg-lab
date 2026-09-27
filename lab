@@ -83,9 +83,10 @@ SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
 
 CI
   ci                       the whole lab at SCALE=LAB_SCALE, as GitHub Actions runs it: up, seed,
-                           casebook, partitions, tests, PITR drills (recorded time, restore
-                           point), replica, switchover there and back, failover drill, tests
-                           again, monitoring (reports go to out/reports)
+                           workload, casebook, indexing, partitions, tests, RLS plans, PITR
+                           drills (recorded time, restore point), replica, switchover there and
+                           back, failover drill, tests again, monitoring with a short load
+                           (reports go to out/reports)
 
 Tests
   test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
@@ -294,7 +295,9 @@ cmd_ci() {
   started=$(now_s)
   cmd_up
   cmd_seed "$@"
+  cmd_workload
   cmd_casebook
+  cmd_indexing
   cmd_partition
   cmd_partition_maintain --ahead 4 --retain 12
   cmd_test
@@ -310,6 +313,7 @@ cmd_ci() {
   unset LAB_PRIMARY_HOST
   cmd_test
   cmd_monitor up
+  cmd_load --seconds 10 --clients 2
   cmd_monitor check
   log "the CI sequence passed in $(elapsed "$started" "$(now_s)") s (reports in out/reports)"
 }
