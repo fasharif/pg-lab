@@ -65,13 +65,19 @@ e-mail domains are reserved example domains.
 **Context.** This machine is shared with other builds; durations measured here would mislead.
 
 **Decision.** The workload is ranked by shared buffers touched (`EXPLAIN (ANALYZE, BUFFERS)`),
-which depends on data and plan, not on load. Default runs use `TIMING OFF, SUMMARY OFF` and
-strip the `I/O Timings` lines, so no duration reaches a report. `--measure` records the median of
-N runs of server-side planning plus execution time, with the result rows serialised to text
-(`EXPLAIN (ANALYZE, SERIALIZE TEXT, TIMING OFF, SUMMARY ON)`), for a quiet machine.
+which depends on the data and the plan rather than on load (a parallel plan's count varies a
+little from run to run). Default runs use `TIMING OFF, SUMMARY OFF` and strip the `I/O Timings`
+lines, so no duration reaches a report. `--measure` records the median of N runs of server-side
+planning plus execution time, with the result rows serialised to text
+(`EXPLAIN (ANALYZE, SERIALIZE TEXT, TIMING OFF, SUMMARY ON)`), for a quiet machine, and ranks the
+workload by that time instead.
 
 **Consequences.** Reports can be generated anywhere and compared. Every timing column in the
-committed reports says "pending a measured run" (docs/benchmarking.md).
+committed reports says "pending a measured run" (docs/benchmarking.md). Buffers are a proxy:
+the casebook holds the statements that read the most pages, which is not the same as the
+slowest (a sequential scan testing six `ILIKE` patterns per row, as the RFQ search does, spends
+its time on CPU). The measured run re-ranks by time, and statements that rise get cases
+(docs/benchmarking.md, "When the time ranking differs").
 
 ## 6. The casebook is data, and CI checks plan shape
 

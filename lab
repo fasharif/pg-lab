@@ -34,10 +34,11 @@ Setup
 
 Performance
   workload [--measure] [--runs N] [--state baseline|tuned|current]
-                           rank every API statement by buffers touched (reports/workload.md)
+                           rank every API statement by buffers touched, or by median time
+                           with --measure (reports/workload.md)
   casebook [--measure] [--runs N]
-                           before/after plans of the ten heaviest statements (by shared
-                           buffers), with plan checks
+                           before/after plans of the ten cases (the heaviest statements by
+                           shared buffers; case 4 with its pagination total), with plan checks
                            (reports/casebook.md); leaves the schema tuned
   tune | untune            apply or revert every casebook fix
   indexing                 index sizes and WAL per inserted row, before and after the

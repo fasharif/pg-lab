@@ -80,9 +80,10 @@ def test_timing_cells_show_the_planning_share() -> None:
     assert timing_cell(250.0, None) == "250 ms"
 
 
-def _result(query_id: str, plan_name: str) -> WorkloadResult:
+def _result(query_id: str, plan_name: str, median_ms: float | None = None) -> WorkloadResult:
     query = WorkloadQuery(query_id, query_id, "apps/api/src/x.ts:1 f", "SELECT 1", {})
-    return WorkloadResult(query, "SELECT 1", load_plan(plan_name), None)
+    timing = Timing((median_ms,)) if median_ms is not None else None
+    return WorkloadResult(query, "SELECT 1", load_plan(plan_name), timing)
 
 
 def test_ranking_puts_the_most_buffers_first() -> None:
@@ -91,6 +92,24 @@ def test_ranking_puts_the_most_buffers_first() -> None:
         _result("large", "orders-org-history.before"),
     ]
     assert [r.query.id for r in rank(results)] == ["large", "small"]
+
+
+def test_a_measured_run_ranks_by_median_time() -> None:
+    # Fewer buffers but slower (a CPU-heavy filter, say): time decides in a measured run.
+    results = [
+        _result("many-buffers", "orders-org-history.before", median_ms=1.5),
+        _result("few-buffers", "orders-org-history.after", median_ms=30.0),
+    ]
+    assert [r.query.id for r in rank(results)] == ["few-buffers", "many-buffers"]
+    text = render_report(
+        results,
+        info(measured=True),
+        command="./lab workload --measure",
+        casebook_queries={},
+        state="baseline",
+    )
+    assert "ranked by median time" in text
+    assert "| 1 | `few-buffers` |" in text
 
 
 def test_workload_report_marks_casebook_entries() -> None:
