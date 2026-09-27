@@ -73,9 +73,9 @@ Monitoring
                            pgbench with TopFlow back-office traffic (default 120 s, 4 clients)
 
 Security
-  rls-plans                the tenant's order page and total under three policy designs
-                           and one index variant (reports/rls-plans.md); leaves the
-                           schema tuned
+  rls-plans [--measure]    the tenant's order page, its total and a count that forgets the
+                           tenant filter, under three policy designs and one index variant
+                           (reports/rls-plans.md); leaves the schema tuned
 
 SQL Server chapter (written, not run: needs MSSQL_ACCEPT_EULA=Y from you)
   sqlserver up|seed [--scale N]|casebook|down

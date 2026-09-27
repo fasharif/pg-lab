@@ -12,6 +12,11 @@ once before it is explained, so one-off reads (compiling the policy function in 
 are not counted. For the page, the report also plans the statement with index scans disabled:
 the gap between that plan's cost and the chosen one's is how far the planner is from giving
 up the index.
+
+A third statement counts the orders without a tenant filter: the query row-level security
+exists to catch. Under a policy the planner cannot see into, the policy is its only filter and
+is evaluated on every order the scan reads; the report counts those rows. Measured runs
+(--measure, quiet machine only) add the median time of each statement under each design.
 """
 
 from __future__ import annotations
@@ -20,9 +25,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pglab.db import Connection, scalar
-from pglab.execute import explain_json, explain_text, plan_only, render
+from pglab.execute import Timing, explain_json, explain_text, measure, plan_only, render
 from pglab.explain import Plan, format_blocks, summarise
-from pglab.report import RunInfo, code, table
+from pglab.report import RunInfo, code, ms, table
 
 PAGE = """SELECT o.* FROM orders AS o
 WHERE o."organizationId" = %(org_id)s
@@ -31,6 +36,10 @@ LIMIT 20"""
 
 COUNT = """SELECT count(*) FROM orders AS o
 WHERE o."organizationId" = %(org_id)s"""
+
+# The same count with the tenant filter forgotten: row-level security must still limit it to
+# the tenant's orders, and the plan shows what that costs under each policy design.
+UNFILTERED = """SELECT count(*) FROM orders AS o"""
 
 TRANSPARENT_POLICY = """
 ALTER POLICY orders_app ON orders
@@ -65,6 +74,10 @@ class Variant:
     page_text: str
     count_text: str
     without_index: Plan
+    unfiltered: Plan
+    unfiltered_text: str
+    # Median times of the page, the total and the unfiltered count; measured runs only.
+    timings: tuple[Timing, Timing, Timing] | None = None
 
 
 def _tenant_context(conn: Connection) -> None:
@@ -74,9 +87,11 @@ def _tenant_context(conn: Connection) -> None:
     )
 
 
-def _variant(conn: Connection, label: str, page: str, count: str) -> Variant:
+def _variant(
+    conn: Connection, label: str, page: str, count: str, runs: int | None = None
+) -> Variant:
     """Must run inside a transaction that is rolled back (it changes planner settings)."""
-    for statement in (page, count):
+    for statement in (page, count, UNFILTERED):
         conn.execute(statement).fetchall()
     measured = (
         explain_json(conn, page),
@@ -84,9 +99,22 @@ def _variant(conn: Connection, label: str, page: str, count: str) -> Variant:
         explain_text(conn, page),
         explain_text(conn, count),
     )
+    unfiltered, unfiltered_text = explain_json(conn, UNFILTERED), explain_text(conn, UNFILTERED)
+    timings = (
+        (measure(conn, page, runs), measure(conn, count, runs), measure(conn, UNFILTERED, runs))
+        if runs
+        else None
+    )
     conn.execute("SET LOCAL enable_indexscan = off")
     conn.execute("SET LOCAL enable_indexonlyscan = off")
-    return Variant(label, *measured, without_index=plan_only(conn, page))
+    return Variant(
+        label,
+        *measured,
+        without_index=plan_only(conn, page),
+        unfiltered=unfiltered,
+        unfiltered_text=unfiltered_text,
+        timings=timings,
+    )
 
 
 def orders_estimate(plan: Plan) -> float | None:
@@ -98,6 +126,32 @@ def orders_estimate(plan: Plan) -> float | None:
     return None
 
 
+def orders_read(plan: Plan) -> int | None:
+    """Orders the plan's scans of `orders` read: the rows they returned plus the rows their
+    filter removed, over every loop and parallel worker. Under a policy the planner cannot see
+    into, that filter is the policy, evaluated once for each of these rows."""
+    total = 0.0
+    found = False
+    for node in plan.nodes():
+        if node.relation != "orders" or node.node_type == "Bitmap Index Scan":
+            continue
+        if node.actual_rows is None:
+            continue
+        removed = node.raw.get("Rows Removed by Filter", 0)
+        removed = float(removed) if isinstance(removed, (int, float)) else 0.0
+        total += (node.actual_rows + removed) * (node.actual_loops or 1.0)
+        found = True
+    return round(total) if found else None
+
+
+def counted(plan: Plan) -> str:
+    """The value a count(*) plan returned is not in the plan; its scan's output rows are."""
+    for node in plan.nodes():
+        if node.relation == "orders" and node.actual_rows is not None:
+            return f"{node.actual_rows * (node.actual_loops or 1.0):,.0f}"
+    return ""
+
+
 def counted_rows(plan: Plan) -> str:
     """Rows seen by a count(*) plan: the actual rows of its scan of orders."""
     for node in plan.nodes():
@@ -106,8 +160,9 @@ def counted_rows(plan: Plan) -> str:
     return "an unknown number of"
 
 
-def compare(conn: Connection) -> tuple[str, str, list[Variant]]:
-    """conn must be the superuser (SET ROLE). Returns the two statements and the variants."""
+def compare(conn: Connection, runs: int | None = None) -> tuple[str, str, list[Variant]]:
+    """conn must be the superuser (SET ROLE). Returns the two statements and the variants;
+    with `runs`, each statement is also timed (measured runs)."""
     org_id = str(scalar(conn, "SELECT lab.uid('org', 1)"))
     page = render(conn, PAGE, {"org_id": org_id})
     count = render(conn, COUNT, {"org_id": org_id})
@@ -127,7 +182,7 @@ def compare(conn: Connection) -> tuple[str, str, list[Variant]]:
                         conn.execute(statement)
                 conn.execute("SET LOCAL ROLE topflow_app")
                 _tenant_context(conn)
-            variants.append(_variant(conn, label, page, count))
+            variants.append(_variant(conn, label, page, count, runs))
     return page, count, variants
 
 
@@ -142,6 +197,17 @@ def cost_ratio(v: Variant) -> float | None:
     if chosen is None or alternative is None or chosen <= 0:
         return None
     return alternative / chosen
+
+
+def _number(value: int | None) -> str:
+    return f"{value:,}" if value is not None else ""
+
+
+def _medians(v: Variant) -> tuple[str, str, str]:
+    if v.timings is None:
+        return ms(None), ms(None), ms(None)
+    page, count, unfiltered = v.timings
+    return ms(page.median_ms), ms(count.median_ms), ms(unfiltered.median_ms)
 
 
 def _costs(v: Variant) -> str:
@@ -198,6 +264,40 @@ def render_report(
         "",
         code(count, "sql"),
         "",
+        "## A query that forgets its tenant filter",
+        "",
+        "Row-level security exists for the query that forgets its tenant filter. Here it is,",
+        "the order count without a `WHERE` clause. *Orders read* counts the rows the scans of",
+        "`orders` read (returned plus removed by a filter): under a policy the planner cannot",
+        "see into, the policy is that filter and runs once for each of them.",
+        "",
+        code(UNFILTERED, "sql"),
+        "",
+        table(
+            ["Planned as", "Buffers", "Access path", "Orders read", "Orders counted"],
+            [
+                (
+                    v.label,
+                    format_blocks(v.unfiltered.shared_buffers()),
+                    summarise(v.unfiltered),
+                    _number(orders_read(v.unfiltered)),
+                    counted(v.unfiltered),
+                )
+                for v in variants
+            ],
+            "lrlrr",
+        ),
+        "",
+        "## Timings",
+        "",
+        "Median planning plus execution time of each statement under each design.",
+        "",
+        table(
+            ["Planned as", "Page", "Total", "Count without a tenant filter"],
+            [(v.label, *_medians(v)) for v in variants],
+            "lrrr",
+        ),
+        "",
     ]
     for v in variants:
         lines += [
@@ -210,6 +310,10 @@ def render_report(
             "Total:",
             "",
             code(v.count_text, "text"),
+            "",
+            "Count without a tenant filter:",
+            "",
+            code(v.unfiltered_text, "text"),
             "",
         ]
     lines += [

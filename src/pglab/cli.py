@@ -184,15 +184,16 @@ def cmd_rls_report(args: argparse.Namespace) -> int:
     _, cases = _definitions()
     # SET ROLE to the application role needs the superuser; no lab role may impersonate another.
     with connect("postgres", application_name="pglab-rls") as conn:
-        info = run_info(conn, measured=False, runs=0)
+        info = run_info(conn, measured=args.measure, runs=args.runs)
         casebook.apply_all(conn, cases)
-        page, count, variants = rls.compare(conn)
+        page, count, variants = rls.compare(conn, _runs(args))
     _write(Path(args.output), rls.render_report(page, count, variants, info, command=args.label))
     for v in variants:
         print(
             f"page {v.page.shared_buffers():>7,} buffers, total {v.count.shared_buffers():>7,}"
             f" buffers, estimate {rls.orders_estimate(v.page) or 0:>8,.0f},"
-            f" cost factor without index {rls.cost_ratio(v) or 0:>6,.1f}  {v.label}"
+            f" cost factor without index {rls.cost_ratio(v) or 0:>6,.1f},"
+            f" unfiltered count reads {rls.orders_read(v.unfiltered) or 0:>9,} orders  {v.label}"
         )
     return 0
 
@@ -336,6 +337,7 @@ def _performance_commands(sub: Subparsers) -> None:
 
     p = sub.add_parser("rls-report", help="tenant query plans under three RLS policy designs")
     p.add_argument("--output", default=str(REPORTS_DIR / "rls-plans.md"))
+    _timing_options(p)
     p.set_defaults(func=cmd_rls_report)
 
     p = sub.add_parser("mssql-report", help="SQL Server chapter: check plans from sqlcmd output")
