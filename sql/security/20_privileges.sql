@@ -66,7 +66,7 @@ GRANT UPDATE (status, "respondedAt", "respondedById", "responseNote", "purchaseO
               "approvedById", "approvedAt", "updatedAt")
     ON quotations TO topflow_app;
 -- Customers edit their profile and their organisation's details, but not the columns that
--- Top Flow staff control: role and active flag, verification, credit and discount.
+-- back-office staff control: role and active flag, verification, credit and discount.
 GRANT SELECT, INSERT ON users TO topflow_app;
 GRANT UPDATE ("fullName", "companyName", "phoneNumber", "birthDate", gender, "updatedAt",
               "lastLoginAt", "lastSessionId", "emailVerifiedAt")

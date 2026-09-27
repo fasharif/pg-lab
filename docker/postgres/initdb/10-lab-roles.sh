@@ -36,7 +36,8 @@ CREATE ROLE topflow_app LOGIN PASSWORD :'app_pw' CONNECTION LIMIT 60;
 ALTER ROLE topflow_app SET statement_timeout = '30s';
 ALTER ROLE topflow_app SET idle_in_transaction_session_timeout = '60s';
 
--- Top Flow staff (back office): every tenant, still no DDL and no rewriting of history.
+-- Back-office staff (the supplier's employees in TopFlow Hub's model): every tenant, still
+-- no DDL and no rewriting of history.
 CREATE ROLE topflow_backoffice LOGIN PASSWORD :'backoffice_pw' CONNECTION LIMIT 20;
 ALTER ROLE topflow_backoffice SET statement_timeout = '60s';
 ALTER ROLE topflow_backoffice SET idle_in_transaction_session_timeout = '60s';
