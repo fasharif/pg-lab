@@ -91,7 +91,14 @@ replica_up() {
   compose rm -sf "$standby" >/dev/null 2>&1 || true
   remove_volume "${standby}-data"
   env "$(bootstrap_var "$standby")=replica" docker compose --project-directory "$LAB_ROOT_HOST" \
-    --profile replica up -d --wait "$standby"
+    --profile replica up -d "$standby"
+  # pg_basebackup copies the whole data directory before PostgreSQL starts. At SCALE=10000000
+  # (tens of gigabytes with the casebook's indexes and the partitioned copies) that outlasted the
+  # health check's retries, and "up --wait" gave up on a clone that was still running. The
+  # container reports unhealthy until the clone ends; wait for it to turn healthy instead,
+  # and stop at once if the clone fails (the container exits).
+  info "copying the data directory; this takes minutes for a large data set"
+  wait_healthy "$standby" 3600
   wait_until "$standby streams from $primary" 120 "$primary" \
     "SELECT EXISTS (SELECT 1 FROM pg_stat_replication WHERE application_name = '$standby' AND state = 'streaming')"
   replica_status
