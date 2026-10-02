@@ -80,3 +80,10 @@ def test_blocks_are_replaced_between_their_markers_only() -> None:
     )
     with pytest.raises(LabError, match="no markers for drills"):
         readme.replace_blocks(text, {"drills": "x"})
+
+
+def test_the_readme_quotes_the_committed_reports(root: Path) -> None:
+    """README.md must hold exactly what ./lab readme builds from reports/."""
+    text = (root / "README.md").read_text(encoding="utf-8")
+    blocks = readme.build_blocks(root / "reports")
+    assert readme.replace_blocks(text, blocks) == text, "run ./lab readme"
