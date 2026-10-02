@@ -1,5 +1,5 @@
 """Analysis and reports of the reliability drills: point-in-time recovery, planned switchover
-and unplanned failover.
+and unplanned failover (a crashed primary).
 
 The drill functions in scripts/drills.sh drive Docker and record what they did in a facts file
 (KEY=value lines) next to the heartbeat log. This module checks the outcome and renders the
@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from pglab.db import Connection, scalar
@@ -106,6 +107,30 @@ def longest_gap(attempts: Sequence[Attempt]) -> Gap | None:
         previous = attempt
         failed = 0
     return best
+
+
+def epoch_of(timestamp: str) -> float:
+    """Seconds since the epoch of an ISO 8601 time such as Docker's
+    '2026-10-02T16:44:41.313133287Z' (digits beyond microseconds are dropped)."""
+    try:
+        return datetime.fromisoformat(timestamp).timestamp()
+    except ValueError as exc:
+        raise LabError(f"not an ISO 8601 time: {timestamp!r}") from exc
+
+
+def reconnection(attempts: Sequence[Attempt], node: str) -> float | None:
+    """How long the client's first acknowledged write on `node` took, from sending it to its
+    acknowledgement: mostly the client's reconnection after the old primary went away."""
+    for attempt in attempts:
+        if attempt.ok and attempt.node == node:
+            return acknowledged_at(attempt) - attempt.sent_at
+    return None
+
+
+RECONNECTION = (
+    "Reconnection: the client's first write on the new primary, from sending it to its "
+    "acknowledgement"
+)
 
 
 def node_sequence(attempts: Sequence[Attempt]) -> list[str]:
@@ -428,6 +453,7 @@ def analyse_switchover(
             "Switchover script: old primary stopped until the new one was promoted",
             float(fact(facts, "PROMOTE_SECONDS")) if measured else None,
         ),
+        (RECONNECTION, reconnection(attempts, new) if measured else None),
     ]
     if gap and measured:
         result.notes.append(f"{gap.failed_between} write attempts failed during the longest gap.")
@@ -444,17 +470,51 @@ class FailoverState:
     rewind_role_is_superuser: bool
 
 
-def analyse_failover(facts: dict[str, str], state: FailoverState) -> DrillResult:
+@dataclass(frozen=True)
+class ClientWrites:
+    """The heartbeat client's acknowledged writes in the failover drill, by node."""
+
+    by_old: list[Attempt]  # acknowledged by the old primary before it crashed
+    lost: list[int]  # of those, the ones the new primary does not have
+    by_new: list[Attempt]  # acknowledged by the new primary after the promotion
+    missing_on_new: list[int]  # of those, the ones the new primary does not have (none)
+
+
+def client_writes(
+    attempts: Sequence[Attempt], old: str, new: str, on_new: frozenset[int]
+) -> ClientWrites:
+    acked = _acked(attempts)
+    by_old = [a for a in acked if a.node == old]
+    by_new = [a for a in acked if a.node == new]
+    return ClientWrites(
+        by_old,
+        [a.seq for a in by_old if a.seq not in on_new],
+        by_new,
+        [a.seq for a in by_new if a.seq not in on_new],
+    )
+
+
+def analyse_failover(
+    facts: dict[str, str],
+    state: FailoverState,
+    attempts: Sequence[Attempt],
+    *,
+    measured: bool,
+) -> DrillResult:
     old, new = fact(facts, "OLD_PRIMARY"), fact(facts, "NEW_PRIMARY")
     lost = int(fact(facts, "LOST_ROWS"))
+    first = int(facts.get("LOST_FIRST_SEQ", "1"))
     new_seq = int(fact(facts, "NEW_SEQ"))
-    lost_seqs = frozenset(range(1, lost + 1))
+    lost_seqs = frozenset(range(first, first + lost))
     diverged = facts.get("REWIND_DIVERGED", "")
     summary = facts.get("REWIND_SUMMARY", "")
     role = facts.get("REWIND_ROLE", "?")
     on_new = len(lost_seqs & state.rows_on_primary)
     on_old = len(lost_seqs & state.rows_on_rejoined)
-    result = DrillResult("Unplanned failover drill: divergence and pg_rewind")
+    writes = client_writes(attempts, old, new, state.rows_on_primary)
+    nodes = node_sequence(attempts)
+    gap = longest_gap(attempts)
+    result = DrillResult("Unplanned failover drill: a crashed primary, divergence and pg_rewind")
     result.checks = [
         Check(
             f"{new} was promoted and accepts writes",
@@ -462,7 +522,17 @@ def analyse_failover(facts: dict[str, str], state: FailoverState) -> DrillResult
             f"writes now go to {state.primary}",
         ),
         Check(
-            f"the {lost} rows {old} accepted after the promotion are not on {new}",
+            "the client moved from the crashed primary to the new one without reconfiguration",
+            nodes == [old, new],
+            " -> ".join(nodes) or "no writes",
+        ),
+        Check(
+            f"every write {new} acknowledged after the promotion is on {new}",
+            bool(writes.by_new) and not writes.missing_on_new,
+            f"{len(writes.by_new):,} acknowledged, {len(writes.missing_on_new)} missing",
+        ),
+        Check(
+            f"the {lost} rows {old} accepted when it came back are not on {new}",
             lost > 0 and on_new == 0,
             f"{on_new} of {lost} found on {new}",
         ),
@@ -491,22 +561,70 @@ def analyse_failover(facts: dict[str, str], state: FailoverState) -> DrillResult
     result.facts_table = [
         ("Old primary", old),
         ("New primary", new),
+        ("Client connection", "libpq multi-host `host=pg1,pg2 target_session_attrs=read-write`"),
+        (
+            "Crash",
+            f"`docker compose kill -s SIGKILL {old}`: every PostgreSQL process of {old} killed, "
+            "no shutdown checkpoint",
+        ),
         (
             "Promotion",
-            f"`pg_promote()` on {new} while {old} kept accepting writes (no fencing): two "
-            "primaries on diverging timelines",
+            f"`pg_promote()` on {new} as soon as the crash was done; no failure detector, "
+            "so no detection delay",
         ),
-        ("Lost transaction", f"{lost} rows written on {old} after the promotion"),
+        (
+            "Acknowledged client writes",
+            f"{len(writes.by_old):,} by {old} before the crash ({len(writes.lost)} of them "
+            f"missing on {new}: asynchronous replication); {len(writes.by_new):,} by {new} "
+            "after the promotion",
+        ),
+        (
+            "Old primary back without fencing",
+            f"{old} restarted: crash recovery, then a primary on its old timeline next to {new}",
+        ),
+        ("Lost transaction", f"{lost} rows written on {old} after it came back"),
         ("Write on the new primary", f"one row (seq {new_seq}) written on {new}"),
         ("pg_rewind", f"`pg_rewind --source-server='host={new} user={role}'` on {old}"),
         ("Rejoin", f"standby.signal, primary_conninfo and a slot on {new}; streaming again"),
     ]
-    result.notes = [
-        "The rows the old primary accepted after the promotion are gone for good: pg_rewind "
+    killed = epoch_of(fact(facts, "KILLED_AT"))
+    promote_started = float(fact(facts, "PROMOTE_STARTED_EPOCH"))
+    promoted = float(fact(facts, "PROMOTED_EPOCH"))
+    result.timings = [
+        (
+            "Write downtime seen by the client: longest gap between acknowledged writes",
+            gap.seconds if (gap and measured) else None,
+        ),
+        (
+            "Old primary killed (Docker's record) until the promotion finished (server clock)",
+            promoted - killed if measured else None,
+        ),
+        (
+            "Of which the promotion itself: `pg_promote()` on the new primary (server clock)",
+            promoted - promote_started if measured else None,
+        ),
+        (RECONNECTION, reconnection(attempts, new) if measured else None),
+    ]
+    if gap and measured:
+        result.notes += [
+            f"{gap.failed_between} write attempts failed during the longest gap. Docker, both "
+            "servers and the client share the clock of Docker Desktop's virtual machine. The "
+            "time from the kill to the start of the promotion is the script's own reaction "
+            "time, two Docker commands; a real failover first has to notice the failure (a "
+            "health check's timeout, or an operator), and that delay comes on top of the "
+            "downtime measured here.",
+            "",
+        ]
+    result.notes += [
+        "Replication is asynchronous: the primary acknowledges a commit once its own WAL is "
+        "flushed, so the writes it acknowledged but had not yet sent when it crashed are lost "
+        "in the failover. The row above counts them for this run.",
+        "",
+        "The rows the old primary accepted after it came back are gone for good: pg_rewind "
         "replaces its diverged pages with the new primary's. In a real failover the same "
         "happens to every write that reaches the old primary once the standby is promoted, "
-        "which is why the old primary must be fenced (stopped, or cut off from clients) before "
-        "the promotion. The planned switchover drill stops it first and loses nothing.",
+        "which is why the old primary must be fenced (kept down, or cut off from clients) "
+        "before the promotion. The planned switchover drill stops it first and loses nothing.",
     ]
     return result
 

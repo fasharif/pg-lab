@@ -63,9 +63,11 @@ Reliability
                            and rejoin it, while a client keeps writing
                            (reports/switchover-drill-<old>-to-<new>.md); run it twice to
                            switch back
-  failover-drill           unplanned failover: promote the standby while the primary still
-                           writes, then pg_rewind (as the non-superuser role rewind) and
-                           rejoin the diverged old primary (reports/failover-drill.md)
+  failover-drill [--measure]
+                           unplanned failover: kill the primary while a client writes and
+                           promote the standby; the old primary comes back without fencing
+                           and diverges, then pg_rewind (as the non-superuser role rewind)
+                           and rejoin it (reports/failover-drill.md)
 
 Monitoring
   monitor up|check|down    postgres_exporter per node, Prometheus (alert rules) and Grafana

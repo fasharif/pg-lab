@@ -37,7 +37,7 @@ CREATE OR REPLACE FUNCTION lab.pick(items text[], r double precision) RETURNS te
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 AS $$ SELECT items[1 + floor(r * cardinality(items))::int] $$;
 
--- Heartbeat rows written by the client loop during the PITR and switchover drills.
+-- Heartbeat rows written by the client loop during the PITR, switchover and failover drills.
 CREATE TABLE IF NOT EXISTS lab.heartbeat (
     run_id       text        NOT NULL,
     seq          bigint      NOT NULL,

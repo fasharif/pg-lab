@@ -75,22 +75,28 @@ drill below is that case.
 
 ## The unplanned failover drill
 
-`./lab failover-drill` rehearses a failover without fencing: the standby is promoted while the
-primary is still running and accepting writes, as happens when a failover is triggered by a
-network partition or a monitoring mistake rather than a dead primary.
+`./lab failover-drill` rehearses the failure the switchover avoids: the primary dies while a
+client is writing. It has two parts. The first measures what the client sees when the standby
+is promoted straight after the crash; the second lets the old primary come back without
+fencing, as a server does when its host restarts, so that it accepts writes the new timeline
+never sees and pg_rewind has real work to do.
 
 | Step | What happens |
 | --- | --- |
-| 1 | `pg_promote()` on the standby while the old primary keeps running: two primaries on diverging timelines |
-| 2 | The old primary commits a transaction of 500 rows that the new primary never receives; the new primary takes one write of its own |
-| 3 | Stop the old primary (the fencing that should have come before step 1) |
-| 4 | `pg_rewind` the old primary against the new one, connected as `rewind` |
-| 5 | Restart it as a standby of the new primary (the same steps as the switchover) |
-| 6 | Check and write the report |
+| 1 | The heartbeat client starts writing through `host=pg1,pg2 target_session_attrs=read-write`, as in the switchover |
+| 2 | The primary crashes: `docker compose kill -s SIGKILL` kills every PostgreSQL process at once, with no shutdown checkpoint and nothing more sent to the standby |
+| 3 | `pg_promote()` on the standby at once (no failure detector, so no detection delay); the client reconnects on its own; then the client stops |
+| 4 | The old primary is started again without fencing: it runs crash recovery and comes up as a second primary on its old timeline |
+| 5 | It commits a transaction of 500 rows that the new primary never receives; the new primary takes one write of its own |
+| 6 | Stop the old primary (the fencing that should have come before step 3) |
+| 7 | `pg_rewind` the old primary against the new one, connected as `rewind` |
+| 8 | Restart it as a standby of the new primary (the same steps as the switchover); check and write the report |
 
 The checks:
 
 - the promoted node accepts writes;
+- the client moved from the crashed primary to the new one without any configuration change, and
+  every write the new primary acknowledged is on it;
 - none of the 500 rows is on the new primary;
 - pg_rewind found the divergence (`servers diverged at WAL location ...`) and rewound the old
   primary, rather than reporting `no rewind required`;
@@ -102,17 +108,27 @@ The checks:
 - the old primary streams from the new one again, has the new primary's write and none of the
   500 rows.
 
-The 500 rows are gone for good. That is the lesson of the drill: once a standby is promoted,
-every write the old primary accepts is lost when it is rewound, so a failover must first make
-sure the old primary cannot accept writes (stop it, or cut it off from clients). The planned
-switchover stops it first and loses nothing. Automatic failover managers such as Patroni do the
-fencing with a lock held in a consensus store; the lab has none (see the roadmap).
+The report also counts the writes the crashed primary had acknowledged but the new one does not
+have. Replication is asynchronous: a commit is acknowledged once the primary's own WAL is
+flushed, so whatever it had not yet sent when it died is lost in the failover. On a quiet lab
+with one small write every 0.1 s that is usually nothing, but it is not guaranteed; synchronous
+replication (`synchronous_standby_names`) would guarantee it at the cost of a network round trip
+on every commit, and of writes stopping when the only standby is down.
+
+The 500 rows are gone for good. That is the second lesson of the drill: once a standby is
+promoted, every write the old primary accepts is lost when it is rewound, so a failover must
+first make sure the old primary cannot accept writes (keep it down, or cut it off from clients).
+The planned switchover stops it first and loses nothing. Automatic failover managers such as
+Patroni do the fencing with a lock held in a consensus store; the lab has none (see the roadmap).
 
 ## Measured values
 
-With `--measure`, the report shows the write downtime seen by the client (the longest gap between
-two acknowledged writes) and the time from stopping the old primary to the promotion. Functional
-runs leave them pending (docs/benchmarking.md).
+With `--measure`, the switchover and failover reports show the write downtime seen by the client
+(the longest gap between two acknowledged writes) and how long the script took: from stopping the
+old primary to the promotion in a switchover, from killing it to the promotion in a failover.
+Functional runs leave them pending (docs/benchmarking.md). The failover drill promotes the
+standby as soon as the primary is dead; a real failover first has to notice the failure (a
+health check's timeout, or an operator), and that delay comes on top of the measured downtime.
 
 ## Clients that are not libpq
 

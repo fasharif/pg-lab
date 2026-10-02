@@ -17,11 +17,13 @@ from pglab.drills import (
     Recovered,
     analyse_failover,
     analyse_pitr,
+    epoch_of,
     load_attempts,
     load_facts,
     longest_gap,
     node_sequence,
     parse_lsn,
+    reconnection,
     render,
     report_name,
     split_at_target,
@@ -364,24 +366,81 @@ FAILOVER_FACTS = {
     "OLD_PRIMARY": "pg1",
     "NEW_PRIMARY": "pg2",
     "LOST_ROWS": "3",
+    "LOST_FIRST_SEQ": "500001",
     "NEW_SEQ": "1000000",
+    "KILLED_AT": "1970-01-01T00:00:00.300000000Z",
+    "PROMOTE_STARTED_EPOCH": "0.55",
+    "PROMOTED_EPOCH": "0.85",
     "REWIND_ROLE": "rewind",
     "REWIND_DIVERGED": "servers diverged at WAL location 0/5000060 on timeline 4",
     "REWIND_SUMMARY": "pg_rewind: Done!",
     "STANDBY_STATE": "streaming",
 }
+# The client writes to pg1 until the crash, fails while pg2 is promoted, then writes to pg2.
+FAILOVER_ATTEMPTS = [
+    attempt(1, 0.0),
+    attempt(2, 0.1),
+    attempt(3, 0.2),
+    attempt(4, 0.3, ok=False),
+    attempt(5, 0.4, ok=False),
+    attempt(6, 0.9, node="pg2"),
+    attempt(7, 1.0, node="pg2"),
+]
+# pg2 has every write the client made before the crash except the last one (not yet sent when
+# pg1 was killed), its own writes after the promotion and the write made on it directly.
+ON_PG2 = frozenset({1, 2, 6, 7, 1_000_000})
 
 
 def test_failover_passes_when_the_lost_rows_are_gone_everywhere() -> None:
-    state = FailoverState("pg2", frozenset({1_000_000}), frozenset({1_000_000}), False)
-    result = analyse_failover(FAILOVER_FACTS, state)
+    state = FailoverState("pg2", ON_PG2, ON_PG2, False)
+    result = analyse_failover(FAILOVER_FACTS, state, FAILOVER_ATTEMPTS, measured=False)
     assert result.passed, [c for c in result.checks if not c.passed]
-    assert result.timings == []
-    assert "## Timings" not in render(result, info(), command="./lab failover-drill")
+    assert [value for _, value in result.timings] == [None, None, None, None]
+    text = render(result, info(), command="./lab failover-drill")
+    assert "| pg1 -> pg2 |" in text
+    assert "3 by pg1 before the crash (1 of them missing on pg2" in text
+    assert "pending a measured run" in text
+
+
+def test_a_measured_failover_reports_the_write_downtime() -> None:
+    state = FailoverState("pg2", ON_PG2, ON_PG2, False)
+    result = analyse_failover(FAILOVER_FACTS, state, FAILOVER_ATTEMPTS, measured=True)
+    gap, crash_to_promoted, promotion, reconnect = (value for _, value in result.timings)
+    assert gap == pytest.approx(0.7)
+    assert crash_to_promoted == pytest.approx(0.55)
+    assert promotion == pytest.approx(0.3)
+    # The helper's attempts are acknowledged when they are sent.
+    assert reconnect == pytest.approx(0.0)
+    assert "2 write attempts failed during the longest gap" in " ".join(result.notes)
+
+
+def test_reconnection_is_the_first_write_on_the_new_primary() -> None:
+    attempts = [
+        Attempt(1, 0.0, True, node="pg1", committed_at=0.01, acked_at=0.02),
+        Attempt(2, 0.1, False, error="server closed the connection unexpectedly"),
+        Attempt(3, 0.3, True, node="pg2", committed_at=4.2, acked_at=4.3),
+        Attempt(4, 4.4, True, node="pg2", committed_at=4.41, acked_at=4.42),
+    ]
+    assert reconnection(attempts, "pg2") == pytest.approx(4.0)
+    assert reconnection(attempts, "pg3") is None
+
+
+def test_docker_times_are_read_to_the_microsecond() -> None:
+    assert epoch_of("2026-10-02T16:44:41.313133287Z") == pytest.approx(1790959481.313133)
+    with pytest.raises(LabError, match="not an ISO 8601 time"):
+        epoch_of("yesterday")
+
+
+def test_the_lost_rows_are_numbered_after_the_client_writes() -> None:
+    # Rows 1 to 3 are the client's writes, not the lost transaction (500001 to 500003).
+    state = FailoverState("pg2", ON_PG2, ON_PG2 | {1, 2, 3}, False)
+    assert analyse_failover(FAILOVER_FACTS, state, FAILOVER_ATTEMPTS, measured=False).passed
+    left = FailoverState("pg2", ON_PG2, ON_PG2 | {500_002}, False)
+    assert not analyse_failover(FAILOVER_FACTS, left, FAILOVER_ATTEMPTS, measured=False).passed
 
 
 def test_failover_fails_without_a_real_rewind_or_with_lost_rows_left() -> None:
-    state = FailoverState("pg2", frozenset({1_000_000}), frozenset({1_000_000}), False)
+    state = FailoverState("pg2", ON_PG2, ON_PG2, False)
     no_work = analyse_failover(
         {
             **FAILOVER_FACTS,
@@ -389,18 +448,36 @@ def test_failover_fails_without_a_real_rewind_or_with_lost_rows_left() -> None:
             "REWIND_SUMMARY": "pg_rewind: no rewind required",
         },
         state,
+        FAILOVER_ATTEMPTS,
+        measured=False,
     )
     assert [c.description for c in no_work.checks if not c.passed] == [
         "pg_rewind found the divergence and rewound pg1"
     ]
     leftover = analyse_failover(
         FAILOVER_FACTS,
-        FailoverState("pg2", frozenset({1_000_000}), frozenset({2, 1_000_000}), False),
+        FailoverState("pg2", ON_PG2, ON_PG2 | {500_001}, False),
+        FAILOVER_ATTEMPTS,
+        measured=False,
     )
     assert not leftover.passed
     superuser = analyse_failover(
-        FAILOVER_FACTS, FailoverState("pg2", frozenset(), frozenset(), True)
+        FAILOVER_FACTS,
+        FailoverState("pg2", ON_PG2, ON_PG2, True),
+        FAILOVER_ATTEMPTS,
+        measured=False,
     )
     assert "pg_rewind connected as a role that is not a superuser" in [
         c.description for c in superuser.checks if not c.passed
+    ]
+
+
+def test_failover_fails_when_the_client_never_reached_the_new_primary() -> None:
+    stuck = [attempt(1, 0.0), attempt(2, 0.1), attempt(3, 0.2, ok=False)]
+    state = FailoverState("pg2", ON_PG2, ON_PG2, False)
+    result = analyse_failover(FAILOVER_FACTS, state, stuck, measured=False)
+    failed = [c.description for c in result.checks if not c.passed]
+    assert failed == [
+        "the client moved from the crashed primary to the new one without reconfiguration",
+        "every write pg2 acknowledged after the promotion is on pg2",
     ]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reliability drills: streaming replica, point-in-time recovery, planned switchover and
-# unplanned failover.
+# unplanned failover (a crashed primary).
 # Sourced by ./lab (needs scripts/lib.sh); every step runs through docker compose.
 # shellcheck disable=SC2034  # facts are read by the Python analysis
 
@@ -249,10 +249,15 @@ pitr_drill() {
 # Runs pg_rewind on the stopped node $1 against the running primary $2 and prints its output.
 # pg_rewind connects as the role rewind, whose file functions can read every file of the data
 # directory, so the role may log in only for the length of this call (docs/security.md).
+# pg_rewind reads the target's own WAL back from the point where the timelines diverged. A
+# primary that crashed, came back and was then shut down may already have recycled that segment
+# (no checkpoint or slot needed it any more), so pg_rewind fetches missing WAL from the archive
+# with the node's restore_command (--restore-target-wal; the settings are in /etc/postgresql).
 rewind_against() {
   local target=$1 source=$2 output status=0
   node_psql "$source" -c 'ALTER ROLE rewind LOGIN' >/dev/null
   output=$(offline "$target" pg_rewind --target-pgdata="$PGDATA_PATH" \
+    --config-file=/etc/postgresql/postgresql.conf --restore-target-wal \
     --source-server="host=$source port=5432 user=rewind dbname=postgres" 2>&1) || status=$?
   node_psql "$source" -c 'ALTER ROLE rewind NOLOGIN' >/dev/null
   [ "$status" -eq 0 ] || die "pg_rewind failed: $output"
@@ -336,17 +341,27 @@ switchover() {
 }
 
 # ─── Unplanned failover drill ──────────────────────────────────────────────
-# The standby is promoted while the primary still accepts writes (a failover without fencing),
-# the old primary commits a transaction the new timeline never sees, and pg_rewind, connected as
-# the non-superuser role rewind, has real work to do before the old primary can follow.
+# The primary crashes while a client writes, the standby is promoted at once and the client
+# moves to it on its own: that part measures the write downtime and counts the acknowledged
+# writes that asynchronous replication lost. Then the old primary comes back without fencing
+# and accepts a transaction the new timeline never sees, so pg_rewind, connected as the
+# non-superuser role rewind, has real work to do before the old primary can follow.
 FAILOVER_LOST_ROWS=500
+# The heartbeat client numbers its writes from 1; the lost rows and the new primary's own
+# write use numbers it never reaches.
+FAILOVER_LOST_FIRST_SEQ=500001
 FAILOVER_NEW_SEQ=1000000
 
 failover_drill() {
   require_env
   ensure_runner
-  local old new state rewind diverged
-  [ $# -eq 0 ] || die "failover-drill: unknown option $1"
+  local measure=() old new state rewind diverged promoted
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --measure) measure=(--measure); shift ;;
+      *) die "failover-drill: unknown option $1" ;;
+    esac
+  done
   old=$(current_primary) || die "no primary is running (./lab up)"
   new=$(other_node "$old")
   is_running "$new" || die "there is no standby to fail over to (./lab replica up)"
@@ -358,35 +373,61 @@ failover_drill() {
   record NEW_PRIMARY "$new"
   record REWIND_ROLE rewind
   record LOST_ROWS "$FAILOVER_LOST_ROWS"
+  record LOST_FIRST_SEQ "$FAILOVER_LOST_FIRST_SEQ"
   record NEW_SEQ "$FAILOVER_NEW_SEQ"
 
-  log "1/6 promote $new while $old keeps running (no fencing: two primaries)"
-  node_psql "$new" -c 'SELECT pg_promote(wait => true, wait_seconds => 60)' >/dev/null
-  LAB_PRIMARY_HOST=$new
+  log "1/8 the application writes through host=pg1,pg2 target_session_attrs=read-write"
+  heartbeat_start "pg1,pg2"
+  sleep 3
 
-  log "2/6 $old commits $FAILOVER_LOST_ROWS rows that $new never receives; $new takes one write"
+  log "2/8 $old crashes: SIGKILL, so no shutdown checkpoint and nothing more sent to $new"
+  compose kill -s SIGKILL "$old" >/dev/null
+  # When the container died, by Docker's clock: the clock of the virtual machine that also runs
+  # the servers and the client, so the durations below need no clock comparison across hosts.
+  record KILLED_AT "$(docker inspect -f '{{.State.FinishedAt}}' "$(container_name "$old")")"
+
+  log "3/8 promote $new at once (a failure detector would add its own delay before this)"
+  # Three statements in one session: the server's clock before and after the promotion.
+  promoted=$(node_psql "$new" -At -c 'SELECT extract(epoch FROM clock_timestamp())' \
+    -c 'SELECT pg_promote(wait => true, wait_seconds => 60)' \
+    -c 'SELECT extract(epoch FROM clock_timestamp())' | tr -d '\r')
+  [ "$(printf '%s\n' "$promoted" | sed -n 2p)" = t ] || die "pg_promote() on $new failed: $promoted"
+  record PROMOTE_STARTED_EPOCH "$(printf '%s\n' "$promoted" | sed -n 1p)"
+  record PROMOTED_EPOCH "$(printf '%s\n' "$promoted" | sed -n 3p)"
+  LAB_PRIMARY_HOST=$new
+  wait_until "the client writes to $new" 60 "$new" \
+    "SELECT EXISTS (SELECT 1 FROM lab.heartbeat WHERE run_id = '$DRILL_ID' AND node = '$new')"
+  sleep 2
+  heartbeat_stop
+
+  log "4/8 $old comes back without fencing: crash recovery, then a second primary"
+  compose start "$old" >/dev/null
+  wait_ready "$old" 300
+  wait_until "$old accepts writes" 120 "$old" 'SELECT NOT pg_is_in_recovery()'
+
+  log "5/8 $old commits $FAILOVER_LOST_ROWS rows that $new never receives; $new takes one write"
   node_psql "$old" -c "INSERT INTO lab.heartbeat (run_id, seq, sent_at)
-                       SELECT '$DRILL_ID', g, now() FROM generate_series(1, $FAILOVER_LOST_ROWS) AS g" >/dev/null
+                       SELECT '$DRILL_ID', g, now()
+                       FROM generate_series($FAILOVER_LOST_FIRST_SEQ,
+                                            $((FAILOVER_LOST_FIRST_SEQ + FAILOVER_LOST_ROWS - 1))) AS g" >/dev/null
   node_psql "$new" -c "INSERT INTO lab.heartbeat (run_id, seq, sent_at)
                        VALUES ('$DRILL_ID', $FAILOVER_NEW_SEQ, now())" >/dev/null
 
-  log "3/6 stop $old: the fencing that should have come before the promotion"
+  log "6/8 stop $old: the fencing that should have come before the promotion"
   compose stop -t 60 "$old" >/dev/null
   ensure_slot "$new" "$old"
 
-  log "4/6 pg_rewind $old against $new as the non-superuser role rewind"
+  log "7/8 pg_rewind $old against $new as the non-superuser role rewind"
   rewind=$(rewind_against "$old" "$new")
   printf '%s\n' "$rewind" | sed 's/^/    /' >&2
   diverged=$(printf '%s\n' "$rewind" | grep -m 1 'servers diverged at' | sed 's/^pg_rewind: //' | tr -d '\r' || true)
   record REWIND_DIVERGED "$diverged"
   record REWIND_SUMMARY "$(printf '%s' "$rewind" | tail -n 1 | tr -d '\r')"
 
-  log "5/6 restart $old as a standby of $new"
+  log "8/8 restart $old as a standby of $new, then verify"
   rejoin_as_standby "$old" "$new"
   record STANDBY_STATE streaming
   wait_until "$old has replayed the write made on $new" 120 "$old" \
     "SELECT EXISTS (SELECT 1 FROM lab.heartbeat WHERE run_id = '$DRILL_ID' AND seq = $FAILOVER_NEW_SEQ)"
-
-  log "6/6 verify"
-  pglab "./lab failover-drill" drill-report failover --dir "/work/$DRILL_DIR"
+  pglab "./lab failover-drill ${measure[*]}" drill-report failover --dir "/work/$DRILL_DIR" "${measure[@]}"
 }

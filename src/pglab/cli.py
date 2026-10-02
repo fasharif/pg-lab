@@ -257,7 +257,10 @@ def cmd_drill_report(args: argparse.Namespace) -> int:
             attempts = drills.load_attempts(folder / "heartbeat.jsonl")
             result = drills.analyse_switchover(conn, facts, attempts, measured=args.measure)
         else:
-            result = drills.analyse_failover(facts, _failover_state(conn, facts))
+            attempts = drills.load_attempts(folder / "heartbeat.jsonl")
+            result = drills.analyse_failover(
+                facts, _failover_state(conn, facts), attempts, measured=args.measure
+            )
     text = drills.render(result, info, command=args.label)
     default = REPORTS_DIR / drills.report_name(args.drill, facts)
     _write(Path(args.output) if args.output else default, text)
