@@ -227,7 +227,7 @@ cmd_rls_plans() {
   require_env
   ensure_runner
   log "comparing plans under row-level security"
-  pglab "./lab rls-plans" rls-report "$@"
+  pglab "./lab rls-plans $*" rls-report "$@"
 }
 
 cmd_replica() {
