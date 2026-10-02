@@ -133,7 +133,7 @@ def cmd_index_report(args: argparse.Namespace) -> int:
     _, cases = _definitions()
     # CHECKPOINT (for comparable WAL probes) needs a superuser or pg_checkpoint.
     with connect("postgres", application_name="pglab-indexing") as conn:
-        info = run_info(conn, measured=False, runs=0)
+        info = run_info(conn, measured=False, runs=0, durations="none")
         report = indexing.build_report(conn, cases)
     _write(Path(args.output), indexing.render_report(report, info, command=args.label))
     for name in indexing.PROBES:
@@ -146,7 +146,7 @@ def cmd_index_report(args: argparse.Namespace) -> int:
 
 def cmd_dataset_report(args: argparse.Namespace) -> int:
     with connect(application_name="pglab-dataset") as conn:
-        info = run_info(conn, measured=False, runs=0)
+        info = run_info(conn, measured=False, runs=0, durations="none")
         data = dataset.build(conn)
     _write(Path(args.output), dataset.render(data, info, command=args.label))
     for line in dataset.summary(data):
@@ -244,7 +244,8 @@ def cmd_drill_report(args: argparse.Namespace) -> int:
     folder = Path(args.dir)
     facts = drills.load_facts(folder / "facts.env")
     with connect(application_name="pglab-drill") as conn:
-        info = run_info(conn, measured=args.measure, runs=1)
+        # Each drill times one run of itself (shown only with --measure).
+        info = run_info(conn, measured=args.measure, runs=1, durations="drill")
         if args.drill == "pitr":
             count, checksum = drills.order_items_fingerprint(conn)
             recovered = drills.Recovered(

@@ -57,6 +57,17 @@ def test_timings_are_pending_unless_measured() -> None:
     assert "median of 15 runs" in "\n".join(info(measured=True).header_lines("./lab x"))
 
 
+def test_the_header_says_what_kind_of_durations_a_report_holds() -> None:
+    drill = RunInfo("PostgreSQL 18.6", "100", "a", "e", "g", True, 1, durations="drill")
+    assert "one drill run" in drill.timing_note()
+    assert "median" not in drill.timing_note()
+    pending = RunInfo("PostgreSQL 18.6", "100", "a", "e", "g", False, 1, durations="drill")
+    assert pending.timing_note().startswith(PENDING)
+    sizes = RunInfo("PostgreSQL 18.6", "100", "a", "e", "g", False, 0, durations="none")
+    assert sizes.timing_note().startswith("none in this report")
+    assert PENDING not in "\n".join(sizes.header_lines("./lab indexing"))
+
+
 def test_timing_lines_are_recognised() -> None:
     assert is_timing_line("        I/O Timings: shared read=414.085")
     assert is_timing_line("Execution Time: 3.2 ms")
