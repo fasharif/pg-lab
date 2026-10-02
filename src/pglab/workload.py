@@ -117,12 +117,11 @@ def render_report(
             "rllrrllr",
         ),
         "",
-        "The casebook (`reports/casebook.md`) was chosen from the top of the buffer ranking at",
-        "SCALE=1000000, the reference scale: one case per statement, except that a pagination",
-        "total is fixed in its page's case (marked total). Buffers stand in for time until a",
-        "measured run (`./lab workload --measure`) ranks the workload by median time;",
-        "docs/benchmarking.md says what happens when that ranking differs. Regenerate with",
-        "`./lab workload`.",
+        "The casebook (`reports/casebook.md`) was first chosen from the top of the buffer",
+        "ranking at SCALE=1000000 and revised after the measured ranking by median time at",
+        "SCALE=10000000 (docs/benchmarking.md): one case per statement, except that a pagination",
+        "total is fixed in its page's case (marked total). Regenerate with `./lab workload`",
+        "(ranked by buffers) or `./lab workload --measure` (by median time; quiet machine only).",
         "",
     ]
     return "\n".join(lines)

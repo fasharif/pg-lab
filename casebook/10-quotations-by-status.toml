@@ -1,4 +1,5 @@
 query = "quotations-admin-by-status"
+chosen_by = "buffers"
 fix_kind = "Composite B-tree index `(status, updatedAt)` replacing the single-column one"
 
 problem = """

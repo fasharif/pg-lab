@@ -37,9 +37,10 @@ Performance
                            rank every API statement by buffers touched, or by median time
                            with --measure (reports/workload.md)
   casebook [--measure] [--runs N]
-                           before/after plans of the ten cases (the heaviest statements by
-                           shared buffers; case 4 with its pagination total), with plan checks
-                           (reports/casebook.md); leaves the schema tuned
+                           before/after plans of the eleven cases (the heaviest statements
+                           by shared buffers, and the RFQ search that the ranking by time
+                           added; cases 4 and 11 with their pagination totals), with plan
+                           checks (reports/casebook.md); leaves the schema tuned
   tune | untune            apply or revert every casebook fix
   indexing                 index sizes and WAL per inserted row, before and after the
                            casebook (reports/indexing.md); leaves the schema tuned

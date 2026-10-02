@@ -180,6 +180,20 @@ def test_casebook_report_shows_a_total_in_its_case(root: Path) -> None:
     assert [row.endswith("| pass |") for row in rows] == [True, False]
 
 
+def test_casebook_report_says_how_each_case_was_chosen(root: Path) -> None:
+    cases = _cases(root)
+    before, after = _snapshot("orders-admin-search.before"), _snapshot("orders-admin-search.after")
+    results = [CaseResult(case, {}, before, after) for case in cases]
+    text = casebook.render_report(results, info(), command="./lab casebook")
+    assert "The casebook first held 10 cases, chosen by shared buffers touched" in text
+    assert "It added case 11, which the buffer ranking missed." in text
+    assert "Cases 8, 9 and 10 fell outside the ten slowest statements and stay;" in text
+    chosen = [line for line in text.splitlines() if line.startswith("- Chosen by: ")]
+    assert len(chosen) == len(cases)
+    assert chosen[10].startswith("- Chosen by: median time in the measured run")
+    assert chosen[7].startswith("- Chosen by: shared buffers at SCALE=1000000. The measured")
+
+
 def test_the_total_expectations_of_case_4_hold_on_recorded_plans(root: Path) -> None:
     case = _cases(root)[3]
     assert case.total is not None
@@ -190,6 +204,25 @@ def test_the_total_expectations_of_case_4_hold_on_recorded_plans(root: Path) -> 
     assert check_plan(after, case.total.after) == []
     # With the trigram indexes but without the rewrite, the count still reads every order.
     assert "orders" in indexes_only.seq_scanned()
+    assert check_plan(indexes_only, case.total.after) != []
+
+
+def test_the_expectations_of_case_11_hold_on_recorded_plans(root: Path) -> None:
+    case = _cases(root)[10]
+    assert case.total is not None
+    assert check_plan(load_plan("rfq-admin-search.before"), case.before) == []
+    assert check_plan(load_plan("rfq-admin-search.after"), case.after) == []
+    assert check_plan(load_plan("rfq-admin-search-count.before"), case.total.before) == []
+    after = load_plan("rfq-admin-search-count.after")
+    assert check_plan(after, case.total.after) == []
+    # One multicolumn GIN index answers the five patterns on quote_requests: five bitmap scans
+    # of the same index under one BitmapOr.
+    scans = [n for n in after.nodes() if n.index == "quote_requests_search_trgm_idx"]
+    assert len(scans) == 5
+    assert "BitmapOr" in after.node_types()
+    # With the index but without the rewrite, the count still reads every quote request.
+    indexes_only = load_plan("rfq-admin-search-count.tuned-without-rewrite")
+    assert "quote_requests" in indexes_only.seq_scanned()
     assert check_plan(indexes_only, case.total.after) != []
 
 

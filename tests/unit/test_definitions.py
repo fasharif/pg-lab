@@ -28,7 +28,7 @@ def test_repository_workload_and_casebook_are_valid(root: Path) -> None:
     queries = load_workload(root / "workload" / "queries.toml")
     cases = load_cases(root / "casebook", queries)
     assert len(queries) >= 25
-    assert [case.number for case in cases] == list(range(1, 11))
+    assert [case.number for case in cases] == list(range(1, 12))
     for case in cases:
         assert case.after.describe(), f"case {case.number} checks nothing after the fix"
         assert case.problem
@@ -55,6 +55,25 @@ def test_the_order_search_total_is_fixed_in_case_4(root: Path) -> None:
     assert case.total.query.id == "orders-admin-search-count"
     assert "UNION" in case.total.after_sql
     assert case.total.after.no_seq_scan_on == ("orders",)
+
+
+def test_the_rfq_search_and_its_total_are_fixed_in_case_11(root: Path) -> None:
+    queries = load_workload(root / "workload" / "queries.toml")
+    case = load_cases(root / "casebook", queries)[10]
+    assert case.query.id == "rfq-admin-search"
+    assert case.total is not None
+    assert case.total.query.id == "rfq-admin-search-count"
+    assert "UNION" in case.rewrite
+    assert "UNION" in case.total.after_sql
+
+
+def test_cases_say_how_they_were_chosen(root: Path) -> None:
+    """The measured run at SCALE=10000000 revised the buffer-based choice (docs/benchmarking.md)."""
+    queries = load_workload(root / "workload" / "queries.toml")
+    chosen = {case.number: case.chosen_by for case in load_cases(root / "casebook", queries)}
+    assert {n for n, how in chosen.items() if how == "time"} == {11}
+    assert {n for n, how in chosen.items() if how == "buffers"} == {8, 9, 10}
+    assert all(how == "buffers and time" for n, how in chosen.items() if n <= 7)
 
 
 def test_every_casebook_index_is_created_concurrently(root: Path) -> None:
@@ -121,6 +140,7 @@ index_used = ["x"]
         ('query = "orders-page"', 'query = "missing"'),
         ('[after]\nindex_used = ["x"]', "[after]"),
         ('revert = ["DROP INDEX CONCURRENTLY IF EXISTS x"]', ""),
+        ('query = "orders-page"', 'query = "orders-page"\nchosen_by = "luck"'),
     ],
 )
 def test_invalid_cases_are_explained(tmp_path: Path, change: str, message: str) -> None:

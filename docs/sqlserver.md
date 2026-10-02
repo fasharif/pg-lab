@@ -8,8 +8,9 @@ claimed anywhere in this repository.
 
 ## What it does
 
-The same exercise as the PostgreSQL casebook's ten cases (without case 4's pagination total), on
-SQL Server 2022 Developer edition in Docker:
+The same exercise as the PostgreSQL casebook's first ten cases (without case 4's pagination total
+and without case 11, which the measured run added later), on SQL Server 2022 Developer edition in
+Docker:
 
 ```bash
 MSSQL_ACCEPT_EULA=Y ./lab sqlserver up          # builds sqlserver/Dockerfile, starts pg-lab-mssql

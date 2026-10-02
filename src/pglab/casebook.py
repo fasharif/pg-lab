@@ -378,14 +378,7 @@ def render_report(results: Sequence[CaseResult], info: RunInfo, *, command: str)
     out = [
         "# Performance casebook",
         "",
-        "The heaviest statements of the TopFlow API workload by shared buffers touched, chosen",
-        "from the ranking at SCALE=1000000 (`reports/workload.md`), each with its plan before and",
-        "after the fix. Buffers stand in for time until the measured run, which ranks the workload",
-        "by median time (docs/benchmarking.md). A list endpoint runs its pagination total with its",
-        "page and the same filter, so a total that is among the heaviest statements is fixed in",
-        "its page's case. Plans come from `EXPLAIN (ANALYZE, BUFFERS)`; CI checks the plan shape",
-        "of every case (indexes used, nodes present) and that a rewritten statement returns the",
-        "same rows, never timings.",
+        *_introduction(results),
         "",
         *info.header_lines(command),
         "",
@@ -410,6 +403,58 @@ def render_report(results: Sequence[CaseResult], info: RunInfo, *, command: str)
     return "\n".join(out)
 
 
+CHOSEN_BY_TEXT = {
+    "buffers and time": (
+        "shared buffers at SCALE=1000000, and among the ten slowest statements by median time "
+        "in the measured run at SCALE=10000000 (`reports/workload.md`)"
+    ),
+    "buffers": (
+        "shared buffers at SCALE=1000000. The measured run at SCALE=10000000 does not place it "
+        "among the ten slowest statements; it stays in the casebook (docs/benchmarking.md)"
+    ),
+    "time": (
+        "median time in the measured run at SCALE=10000000, which placed it among the ten "
+        "slowest statements although it reads fewer buffers than the cases chosen by buffers "
+        "(`reports/workload.md`)"
+    ),
+}
+
+
+def _introduction(results: Sequence[CaseResult]) -> list[str]:
+    by_buffers = sum(1 for r in results if r.case.chosen_by != "time")
+    by_time = [r.case.number for r in results if r.case.chosen_by == "time"]
+    outside = [r.case.number for r in results if r.case.chosen_by == "buffers"]
+    lines = [
+        "The slowest statements of the TopFlow API workload, each with its plan before and after",
+        f"the fix. The casebook first held {by_buffers} cases, chosen by shared buffers touched in",
+        "the functional ranking at SCALE=1000000; the measured run at SCALE=10000000 then ranked",
+        "the workload by median time (`reports/workload.md`, docs/benchmarking.md).",
+    ]
+    if by_time:
+        lines.append(f"It added {_numbers('case', by_time)}, which the buffer ranking missed.")
+    if outside:
+        verb = "stays" if len(outside) == 1 else "stay"
+        lines.append(
+            f"{_numbers('Case', outside)} fell outside the ten slowest statements and {verb};"
+            " each section says how its case was chosen."
+        )
+    lines += [
+        "A list endpoint runs its pagination total with its page and the same filter, so a total",
+        "that is among the heaviest statements is fixed in its page's case. Plans come from",
+        "`EXPLAIN (ANALYZE, BUFFERS)`; CI checks the plan shape of every case (indexes used, nodes",
+        "present) and that a rewritten statement returns the same rows, never timings.",
+    ]
+    return lines
+
+
+def _numbers(word: str, numbers: Sequence[int]) -> str:
+    """'case 11', 'Cases 8, 9 and 10'."""
+    if len(numbers) == 1:
+        return f"{word} {numbers[0]}"
+    listed = ", ".join(str(n) for n in numbers[:-1]) + f" and {numbers[-1]}"
+    return f"{word}s {listed}"
+
+
 def _anchor(case: Case) -> str:
     return f"case-{case.number:02d}"
 
@@ -424,6 +469,7 @@ def _case_section(r: CaseResult) -> list[str]:
         "",
         f"- API: `{case.query.api}` (workload id `{case.query.id}`)",
         f"- Fix: {case.fix_kind}",
+        f"- Chosen by: {CHOSEN_BY_TEXT[case.chosen_by]}",
         f"- Parameters: {params}",
         "",
         "### Why it is slow",

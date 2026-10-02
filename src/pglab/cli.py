@@ -140,7 +140,7 @@ def cmd_index_report(args: argparse.Namespace) -> int:
     for name in indexing.PROBES:
         before, after = report.baseline[name], report.tuned[name]
         print(
-            f"{name:<12} WAL per row {before.bytes_per_row:,.0f} B -> {after.bytes_per_row:,.0f} B"
+            f"{name:<14} WAL per row {before.bytes_per_row:,.0f} B -> {after.bytes_per_row:,.0f} B"
         )
     return 0
 

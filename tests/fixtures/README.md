@@ -14,6 +14,11 @@ SCALE=1000000 on 2026-09-27: `before` is the count on the baseline schema,
 `tuned-without-rewrite` the same count with the casebook's indexes, and `after` the rewritten
 count on the tuned schema.
 
+`rfq-admin-search.*.json` and `rfq-admin-search-count.*.json` are case 11, the RFQ search and
+its pagination total, with the same three variants. They were recorded the same way at
+SCALE=10000000 on 2026-10-02, at the end of the measured run that added case 11: `before` on the
+baseline schema (`./lab untune`), the other two on the tuned schema (`./lab tune`).
+
 ## exporter-metric-names.txt
 
 Metric names exposed by postgres_exporter v0.20.1 against a lab node, used to check that

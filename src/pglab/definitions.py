@@ -20,6 +20,9 @@ from pglab.explain import Expectation
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PLACEHOLDER = re.compile(r"%\((\w+)\)s")
 API_SOURCE = re.compile(r"^(apps|packages)/[\w./-]+\.ts(:\d+)? .+$")
+# How a case was chosen (docs/benchmarking.md): by shared buffers in the functional ranking at
+# SCALE=1000000, by median time in the measured ranking at SCALE=10000000, or by both.
+CHOSEN_BY = ("buffers and time", "buffers", "time")
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class Case:
     after: Expectation
     path: Path
     total: Total | None = None
+    chosen_by: str = CHOSEN_BY[0]
 
     @property
     def title(self) -> str:
@@ -198,6 +202,7 @@ def load_cases(directory: Path, workload: Mapping[str, WorkloadQuery]) -> list[C
                 after=after,
                 path=path,
                 total=total,
+                chosen_by=_chosen_by(data, where),
             )
         )
     by_number = {case.number: case for case in cases}
@@ -216,6 +221,13 @@ def load_cases(directory: Path, workload: Mapping[str, WorkloadQuery]) -> list[C
     if duplicates:
         raise LabError(f"casebook: queries used by more than one case: {sorted(duplicates)}")
     return cases
+
+
+def _chosen_by(data: Mapping[str, Any], where: str) -> str:
+    chosen_by = _text(data, "chosen_by", where, required=False) or CHOSEN_BY[0]
+    if chosen_by not in CHOSEN_BY:
+        raise LabError(f"{where}: 'chosen_by' must be one of {', '.join(CHOSEN_BY)}")
+    return chosen_by
 
 
 def _total(data: Mapping[str, Any], where: str, workload: Mapping[str, WorkloadQuery]) -> Total:

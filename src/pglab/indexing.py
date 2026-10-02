@@ -48,6 +48,23 @@ PROBES: dict[str, str] = {
                lab.anchor() + make_interval(secs => g), 'B2B', lab.uid('org', 1 + g % 10),
                'PO-PROBE-' || g, 100.00, 5.00
         FROM generate_series(1, {PROBE_ROWS}) AS g""",
+    # One request in four comes from the website, with the visitor's contact details, as in
+    # the generated data; the others come from a trade account with a project reference.
+    "quote_requests": f"""
+        INSERT INTO quote_requests (id, number, "organizationId", "requestedById",
+                                    "projectReference", "shippingAddress", "createdAt",
+                                    "updatedAt", source, "companyName", "contactEmail",
+                                    "contactName")
+        SELECT '{PROBE_PREFIX}' || g, 'TF-RFQ-PROBE-' || lpad(g::text, 6, '0'),
+               CASE WHEN g % 4 <> 0 THEN lab.uid('org', 1 + g % 10) END,
+               CASE WHEN g % 4 <> 0 THEN lab.uid('user', lab.member_user(1 + g % 10, 1)) END,
+               CASE WHEN g % 4 <> 0 THEN 'Probe Villa ' || g END, 'Site 1, Probe',
+               lab.anchor() + make_interval(secs => g), lab.anchor() + make_interval(secs => g),
+               CASE WHEN g % 4 = 0 THEN 'WEBSITE' ELSE 'TRADE_PORTAL' END::"RfqSource",
+               CASE WHEN g % 4 = 0 THEN 'Probe Gardens ' || g END,
+               CASE WHEN g % 4 = 0 THEN 'probe' || g || '@example.net' END,
+               CASE WHEN g % 4 = 0 THEN 'Probe Visitor ' || g END
+        FROM generate_series(1, {PROBE_ROWS}) AS g""",
 }
 
 

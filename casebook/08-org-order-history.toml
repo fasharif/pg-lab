@@ -1,4 +1,5 @@
 query = "orders-org-history"
+chosen_by = "buffers"
 fix_kind = "Composite B-tree index `(organizationId, createdAt)`, `INCLUDE (userId)`"
 
 problem = """

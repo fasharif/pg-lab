@@ -1,4 +1,5 @@
 query = "catalogue-categories"
+chosen_by = "buffers"
 fix_kind = "Partial B-tree index on visible products"
 
 problem = """
