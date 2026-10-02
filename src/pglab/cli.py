@@ -20,6 +20,7 @@ from pglab import (
     monitoring,
     mssql,
     partitioning,
+    readme,
     rls,
     workload,
 )
@@ -355,12 +356,25 @@ def _performance_commands(sub: Subparsers) -> None:
     _timing_options(p)
     p.set_defaults(func=cmd_rls_report)
 
+    p = sub.add_parser("readme", help="rebuild the README's result tables from the reports")
+    # Always the committed reports: the README links to reports/, whatever LAB_REPORTS_DIR says.
+    p.add_argument("--reports", default=str(ROOT / "reports"))
+    p.add_argument("--readme", default=str(ROOT / "README.md"))
+    p.set_defaults(func=cmd_readme)
+
     p = sub.add_parser("mssql-report", help="SQL Server chapter: check plans from sqlcmd output")
     p.add_argument("--before", required=True)
     p.add_argument("--after", required=True)
     p.add_argument("--scale", default=os.environ.get("LAB_SCALE", "unknown"))
     p.add_argument("--output", default=str(REPORTS_DIR / "sqlserver-casebook.md"))
     p.set_defaults(func=cmd_mssql_report)
+
+
+def cmd_readme(args: argparse.Namespace) -> int:
+    path = Path(args.readme)
+    blocks = readme.build_blocks(Path(args.reports))
+    _write(path, readme.replace_blocks(path.read_text(encoding="utf-8"), blocks))
+    return 0
 
 
 def cmd_monitor_check(args: argparse.Namespace) -> int:

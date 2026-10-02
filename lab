@@ -91,6 +91,10 @@ CI
                            back, failover drill, tests again, monitoring with a short load
                            (reports go to out/reports)
 
+Reports
+  readme                   rebuild the README's casebook and drill tables from the reports in
+                           reports/ (run it after regenerating them)
+
 Tests
   test                     pgTAP suites (schema, privileges, tenant isolation, SCRAM,
                            partition functions) and the integration tests; needs seeded data
@@ -321,6 +325,12 @@ cmd_ci() {
   log "the CI sequence passed in $(elapsed "$started" "$(now_s)") s (reports in out/reports)"
 }
 
+cmd_readme() {
+  require_env
+  ensure_runner
+  pglab "./lab readme" readme
+}
+
 cmd_test() {
   require_env
   ensure_runner
@@ -436,6 +446,7 @@ main() {
     switchover) switchover "$@" ;;
     failover-drill) failover_drill "$@" ;;
     ci) cmd_ci "$@" ;;
+    readme) cmd_readme "$@" ;;
     test) cmd_test "$@" ;;
     check) cmd_check "$@" ;;
     status) cmd_status "$@" ;;
