@@ -56,6 +56,25 @@ def test_longest_gap_spans_the_failed_attempts() -> None:
     assert gap.seconds == pytest.approx(1.6)
 
 
+def test_longest_gap_runs_from_acknowledgement_to_acknowledgement() -> None:
+    # Write 3 is sent at 0.3 s but waits for the promotion and is acknowledged at 4.0 s.
+    attempts = [
+        Attempt(1, 0.0, True, node="pg1", committed_at=0.01, acked_at=0.02),
+        Attempt(2, 0.1, False, error="server closed the connection unexpectedly"),
+        Attempt(3, 0.3, True, node="pg2", committed_at=3.99, acked_at=4.0),
+        Attempt(4, 4.1, True, node="pg2", committed_at=4.11, acked_at=4.12),
+    ]
+    gap = longest_gap(attempts)
+    assert gap is not None
+    assert (gap.last_before, gap.first_after, gap.failed_between) == (1, 3, 1)
+    assert gap.seconds == pytest.approx(3.98)
+    # Logs written before the acknowledgement time was recorded fall back to commit times.
+    old_log = [Attempt(a.seq, a.sent_at, a.ok, a.node, a.committed_at) for a in attempts]
+    old_gap = longest_gap(old_log)
+    assert old_gap is not None
+    assert old_gap.seconds == pytest.approx(3.98)
+
+
 def test_longest_gap_needs_two_acknowledged_writes() -> None:
     assert longest_gap([attempt(1, 0.0), attempt(2, 0.1, ok=False)]) is None
 
@@ -164,6 +183,7 @@ def test_heartbeat_logs_failures_and_reconnects() -> None:
     assert recovered.ok
     assert recovered.node == "pg2"
     assert recovered.wal_lsn == "0/2"
+    assert recovered.acked_at == 5.0
     assert server.rows == [1, 4]
     assert server.connections == 3
     lines = [json.loads(line) for line in out.getvalue().splitlines()]

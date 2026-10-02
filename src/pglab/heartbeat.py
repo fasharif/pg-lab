@@ -1,8 +1,9 @@
 """A client that writes one small row at a fixed interval, as an application would.
 
 Used by the drills to see a failover or recovery from the client's side: every attempt is
-logged as one JSON line with its outcome, so the analysis can compute the longest gap
-between two acknowledged writes (write downtime) and check that every acknowledged write
+logged as one JSON line with its outcome and the client's time when it was sent and, for a
+write that succeeded, when it was acknowledged, so the analysis can compute the longest gap
+between two acknowledgements (write downtime) and check that every acknowledged write
 survived. Each acknowledged write also records the server's WAL insert position read inside
 its transaction: its commit record comes later in the WAL, which lets the PITR analysis tell
 for certain that a write started after the recovery target. It connects with libpq's
@@ -41,6 +42,8 @@ class Attempt:
     error: str | None = None
     # pg_current_wal_insert_lsn() inside the write's transaction: a lower bound of its commit LSN.
     wal_lsn: str | None = None
+    # client clock when the server's acknowledgement arrived (logs before 2026-10-02 lack it)
+    acked_at: float | None = None
 
 
 def default_dsn(hosts: str) -> str:
@@ -94,9 +97,16 @@ class Heartbeat:
                 " pg_current_wal_insert_lsn()::text",
                 (self.run_id, self.seq, sent_at),
             ).fetchone()
+            acked_at = self.clock()
             node, committed, wal_lsn = row if row else (None, None, None)
             attempt = Attempt(
-                self.seq, sent_at, True, node=node, committed_at=committed, wal_lsn=wal_lsn
+                self.seq,
+                sent_at,
+                True,
+                node=node,
+                committed_at=committed,
+                wal_lsn=wal_lsn,
+                acked_at=acked_at,
             )
         except psycopg.Error as exc:
             if self.conn is not None:

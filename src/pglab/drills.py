@@ -77,7 +77,21 @@ class Gap:
     failed_between: int
 
 
+def acknowledged_at(attempt: Attempt) -> float:
+    """When the client learnt that a write succeeded. Older logs have no acknowledgement time:
+    the commit time stands in for it (the server and the client share the Docker VM's clock),
+    then the time the write was sent."""
+    if attempt.acked_at is not None:
+        return attempt.acked_at
+    if attempt.committed_at is not None:
+        return attempt.committed_at
+    return attempt.sent_at
+
+
 def longest_gap(attempts: Sequence[Attempt]) -> Gap | None:
+    """The write downtime seen by the client: the longest time from one acknowledged write to
+    the next. Measured between acknowledgements, not between sends: a write that waits seconds
+    for a server that is being promoted is sent early but acknowledged late."""
     best: Gap | None = None
     previous: Attempt | None = None
     failed = 0
@@ -86,7 +100,7 @@ def longest_gap(attempts: Sequence[Attempt]) -> Gap | None:
             failed += 1
             continue
         if previous is not None:
-            seconds = attempt.sent_at - previous.sent_at
+            seconds = acknowledged_at(attempt) - acknowledged_at(previous)
             if best is None or seconds > best.seconds:
                 best = Gap(seconds, previous.seq, attempt.seq, failed)
         previous = attempt
