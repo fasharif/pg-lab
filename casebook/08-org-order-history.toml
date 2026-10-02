@@ -1,0 +1,38 @@
+query = "orders-org-history"
+chosen_by = "buffers"
+fix_kind = "Composite B-tree index `(organizationId, createdAt)`, `INCLUDE (userId)`"
+
+problem = """
+TopFlow's index `(organizationId, status)` finds the organisation's orders, but not in date
+order. For the largest customer the plan fetches every one of its orders from the heap
+(thousands of pages), sorts them by `createdAt` and returns the newest 20. The cost grows with
+the customer's history, so the best customers get the slowest order page.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_organizationId_createdAt_idx" ON orders ("organizationId", "createdAt") INCLUDE ("userId")''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "orders_organizationId_createdAt_idx"''',
+]
+
+tradeoff = """
+Equality on the first column and order on the second: the plan reads the organisation's
+newest 20 index entries backwards and fetches 20 heap rows, whatever the size of the history.
+TopFlow's `(organizationId, status)` index stays: it serves the status filter of the same page
+and the dashboard's count by status with an index-only scan. Both indexes start with
+`organizationId`, so each insert into `orders` pays for two indexes on that column.
+
+`INCLUDE ("userId")` is for the same page's total when the API runs as `topflow_app` under
+row-level security: the tenant policy reads `organizationId` and `userId`, and with both in the
+index the count stays an index-only scan instead of visiting every one of the organisation's
+rows in the heap (docs/security.md). It roughly doubles the index, because the ids are text.
+"""
+
+[before]
+node_present = ["Sort"]
+
+[after]
+index_used = ["orders_organizationId_createdAt_idx"]
+node_absent = ["Sort"]
+no_seq_scan_on = ["orders"]

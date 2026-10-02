@@ -1,0 +1,47 @@
+[project]
+name = "pglab"
+version = "0.1.0"
+description = "Tooling for pg-lab: workload ranking, performance casebook, drills and reports for PostgreSQL."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Farah Sharif" }]
+requires-python = ">=3.14"
+dependencies = ["psycopg[binary]>=3.3,<3.4"]
+
+[project.scripts]
+pglab = "pglab.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3",
+    "pytest>=9.1",
+    "ruff>=0.16",
+    "sqlfluff>=4.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PL", "PT", "C4", "RET", "N"]
+ignore = ["PLR0912", "PLR0913", "PLR2004"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["src", "tests"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs the lab database (run through ./lab test)",
+]

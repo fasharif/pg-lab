@@ -1,0 +1,519 @@
+# The workload: the SQL behind TopFlow Hub's API read paths.
+#
+# Every entry names the API method it comes from (paths are relative to the TopFlow
+# repository at commit 61310d2, see sql/topflow/SOURCE.md). The API uses Prisma; each entry is
+# the main statement Prisma sends for that call, written by hand with the same filters,
+# ordering and page size (20 by default). Prisma loads included relations (user, organisation,
+# line counts) with separate statements keyed by the ids of the page it just read; those are
+# primary-key or foreign-key lookups and are not listed. Every paginated list() method runs
+# its page and a count(*) with the same filter in one transaction ($transaction([findMany,
+# count])), so each page below is followed by its pagination total.
+#
+# params: name -> SQL expression evaluated against the lab database. The value is inlined
+# into the statement as a literal, so the plan is the same custom plan Prisma's bound
+# parameters would get. Expressions pick rows the generator is known to create (for example
+# organisation 1 is the largest customer).
+
+# ─── Orders ────────────────────────────────────────────────────────────────
+
+[[query]]
+id = "orders-org-history"
+title = "Order history of an organisation (trade portal, first page)"
+api = "apps/api/src/orders/orders.service.ts:271 OrdersService.listForOrganization -> list()"
+params = { org_id = "SELECT lab.uid('org', 1)" }
+sql = """
+SELECT o.*
+FROM orders AS o
+WHERE o."organizationId" = %(org_id)s
+ORDER BY o."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "orders-org-count"
+title = "Order count of an organisation (pagination total)"
+api = "apps/api/src/orders/orders.service.ts:697 OrdersService.list() -> order.count"
+params = { org_id = "SELECT lab.uid('org', 1)" }
+sql = """
+SELECT count(*)
+FROM orders AS o
+WHERE o."organizationId" = %(org_id)s
+"""
+
+[[query]]
+id = "orders-customer-history"
+title = "Order history of a retail customer (first page)"
+api = "apps/api/src/orders/orders.service.ts:238 OrdersService.listMine -> list()"
+params = { user_id = "SELECT lab.uid('user', lab.retail_user(1, (lab.dataset_size(lab.scale())).n_orgs))" }
+sql = """
+SELECT o.*
+FROM orders AS o
+WHERE o."userId" = %(user_id)s
+  AND o."organizationId" IS NULL
+ORDER BY o."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "orders-customer-count"
+title = "Order count of a retail customer (pagination total)"
+api = "apps/api/src/orders/orders.service.ts:697 OrdersService.list() -> order.count (listMine)"
+params = { user_id = "SELECT lab.uid('user', lab.retail_user(1, (lab.dataset_size(lab.scale())).n_orgs))" }
+sql = """
+SELECT count(*)
+FROM orders AS o
+WHERE o."userId" = %(user_id)s
+  AND o."organizationId" IS NULL
+"""
+
+[[query]]
+id = "orders-admin-search"
+title = "Back-office order search (order, PO or project number, customer or company name)"
+api = "apps/api/src/orders/orders.service.ts:660 OrdersService.filters(search) via adminList()"
+params = { pattern = "SELECT '%' || substr(min(\"orderNumber\"), 7, 9) || '%' FROM orders" }
+note = "The search term is the start of an order number (for example 2024-0000), which matches about 100 orders."
+sql = """
+SELECT o.*
+FROM orders AS o
+WHERE o."orderNumber" ILIKE %(pattern)s
+   OR o."purchaseOrderNumber" ILIKE %(pattern)s
+   OR o."projectReference" ILIKE %(pattern)s
+   OR o."userId" IN (SELECT u.id FROM users AS u WHERE u."fullName" ILIKE %(pattern)s)
+   OR o."organizationId" IN (SELECT g.id FROM organizations AS g WHERE g.name ILIKE %(pattern)s)
+ORDER BY o."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "orders-admin-search-count"
+title = "Back-office order search, number of matches (pagination total)"
+api = "apps/api/src/orders/orders.service.ts:697 OrdersService.list() -> order.count (adminList with search)"
+params = { pattern = "SELECT '%' || substr(min(\"orderNumber\"), 7, 9) || '%' FROM orders" }
+sql = """
+SELECT count(*)
+FROM orders AS o
+WHERE o."orderNumber" ILIKE %(pattern)s
+   OR o."purchaseOrderNumber" ILIKE %(pattern)s
+   OR o."projectReference" ILIKE %(pattern)s
+   OR o."userId" IN (SELECT u.id FROM users AS u WHERE u."fullName" ILIKE %(pattern)s)
+   OR o."organizationId" IN (SELECT g.id FROM organizations AS g WHERE g.name ILIKE %(pattern)s)
+"""
+
+[[query]]
+id = "orders-admin-by-status"
+title = "Back-office orders in one status (warehouse queue: PROCESSING)"
+api = "apps/api/src/orders/orders.service.ts:310 OrdersService.adminList(status) -> list()"
+params = { status = "SELECT 'PROCESSING'" }
+sql = """
+SELECT o.*
+FROM orders AS o
+WHERE o.status = %(status)s::"OrderStatus"
+ORDER BY o."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "orders-admin-by-status-count"
+title = "Back-office orders in one status, number of orders (pagination total)"
+api = "apps/api/src/orders/orders.service.ts:697 OrdersService.list() -> order.count (adminList with status)"
+params = { status = "SELECT 'PROCESSING'" }
+sql = """
+SELECT count(*)
+FROM orders AS o
+WHERE o.status = %(status)s::"OrderStatus"
+"""
+
+[[query]]
+id = "order-detail-lines"
+title = "Lines of one order (order detail page)"
+api = "apps/api/src/orders/orders.service.ts:651 OrdersService.findOne -> include items"
+params = { order_id = "SELECT lab.uid('order', 4242)" }
+sql = """
+SELECT i.*
+FROM order_items AS i
+WHERE i."orderId" = %(order_id)s
+"""
+
+# ─── Quotations and RFQs ───────────────────────────────────────────────────
+
+[[query]]
+id = "quotations-admin-by-status"
+title = "Back-office quotations in one status (SENT, awaiting the customer)"
+api = "apps/api/src/procurement/quotations.service.ts:486 QuotationsService.adminList(status) -> list()"
+params = { status = "SELECT 'SENT'" }
+sql = """
+SELECT q.*
+FROM quotations AS q
+WHERE q.status = %(status)s::"QuotationStatus"
+ORDER BY q."updatedAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "quotations-admin-by-status-count"
+title = "Back-office quotations in one status, number of quotations (pagination total)"
+api = "apps/api/src/procurement/quotations.service.ts:1168 QuotationsService.list() -> quotation.count (adminList with status)"
+params = { status = "SELECT 'SENT'" }
+sql = """
+SELECT count(*)
+FROM quotations AS q
+WHERE q.status = %(status)s::"QuotationStatus"
+"""
+
+[[query]]
+id = "quotations-org-list"
+title = "Quotations of an organisation, drafts hidden (trade portal)"
+api = "apps/api/src/procurement/quotations.service.ts:507 QuotationsService.orgList -> list()"
+params = { org_id = "SELECT lab.uid('org', 1)" }
+sql = """
+SELECT q.*
+FROM quotations AS q
+WHERE q."organizationId" = %(org_id)s
+  AND q.status <> 'DRAFT'
+ORDER BY q."updatedAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "quotations-org-count"
+title = "Quotations of an organisation, number of quotations (pagination total)"
+api = "apps/api/src/procurement/quotations.service.ts:1168 QuotationsService.list() -> quotation.count (orgList)"
+params = { org_id = "SELECT lab.uid('org', 1)" }
+sql = """
+SELECT count(*)
+FROM quotations AS q
+WHERE q."organizationId" = %(org_id)s
+  AND q.status <> 'DRAFT'
+"""
+
+[[query]]
+id = "rfq-admin-inbox"
+title = "Sales inbox: new website quote requests"
+api = "apps/api/src/procurement/rfq.service.ts:266 RfqService.adminList(status, source) -> list()"
+params = { status = "SELECT 'SUBMITTED'", source = "SELECT 'WEBSITE'" }
+sql = """
+SELECT r.*
+FROM quote_requests AS r
+WHERE r.status = %(status)s::"RfqStatus"
+  AND r.source = %(source)s::"RfqSource"
+ORDER BY r."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "rfq-admin-inbox-count"
+title = "Sales inbox, number of new website quote requests (pagination total)"
+api = "apps/api/src/procurement/rfq.service.ts:585 RfqService.list() -> quoteRequest.count (adminList with status, source)"
+params = { status = "SELECT 'SUBMITTED'", source = "SELECT 'WEBSITE'" }
+sql = """
+SELECT count(*)
+FROM quote_requests AS r
+WHERE r.status = %(status)s::"RfqStatus"
+  AND r.source = %(source)s::"RfqSource"
+"""
+
+[[query]]
+id = "rfq-admin-search"
+title = "Sales search over quote requests (number, project, company, contact)"
+api = "apps/api/src/procurement/rfq.service.ts:508 RfqService.filters(search) via adminList()"
+params = { pattern = "SELECT '%' || substr(min(number), 8, 9) || '%' FROM quote_requests" }
+sql = """
+SELECT r.*
+FROM quote_requests AS r
+WHERE r.number ILIKE %(pattern)s
+   OR r."projectReference" ILIKE %(pattern)s
+   OR r."organizationId" IN (SELECT g.id FROM organizations AS g WHERE g.name ILIKE %(pattern)s)
+   OR r."contactName" ILIKE %(pattern)s
+   OR r."contactEmail" ILIKE %(pattern)s
+   OR r."companyName" ILIKE %(pattern)s
+ORDER BY r."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "rfq-admin-search-count"
+title = "Sales search over quote requests, number of matches (pagination total)"
+api = "apps/api/src/procurement/rfq.service.ts:585 RfqService.list() -> quoteRequest.count (adminList with search)"
+params = { pattern = "SELECT '%' || substr(min(number), 8, 9) || '%' FROM quote_requests" }
+sql = """
+SELECT count(*)
+FROM quote_requests AS r
+WHERE r.number ILIKE %(pattern)s
+   OR r."projectReference" ILIKE %(pattern)s
+   OR r."organizationId" IN (SELECT g.id FROM organizations AS g WHERE g.name ILIKE %(pattern)s)
+   OR r."contactName" ILIKE %(pattern)s
+   OR r."contactEmail" ILIKE %(pattern)s
+   OR r."companyName" ILIKE %(pattern)s
+"""
+
+# ─── Catalogue ─────────────────────────────────────────────────────────────
+
+[[query]]
+id = "catalogue-search"
+title = "Storefront catalogue search, newest first"
+api = "apps/api/src/catalog/products.service.ts:61 ProductsService.list(search, sort=newest)"
+params = { pattern = "SELECT '%solenoid%'", tag = "SELECT 'solenoid'" }
+sql = """
+SELECT p.*
+FROM products AS p
+WHERE p."isActive"
+  AND NOT p."isTradeOnly"
+  AND (p.name ILIKE %(pattern)s
+       OR p.sku ILIKE %(pattern)s
+       OR p.brand ILIKE %(pattern)s
+       OR p.description ILIKE %(pattern)s
+       OR p.tags @> ARRAY[%(tag)s]::text[])
+ORDER BY p."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "catalogue-search-count"
+title = "Storefront catalogue search, result count"
+api = "apps/api/src/catalog/products.service.ts:93 ProductsService.list -> product.count"
+params = { pattern = "SELECT '%solenoid%'", tag = "SELECT 'solenoid'" }
+sql = """
+SELECT count(*)
+FROM products AS p
+WHERE p."isActive"
+  AND NOT p."isTradeOnly"
+  AND (p.name ILIKE %(pattern)s
+       OR p.sku ILIKE %(pattern)s
+       OR p.brand ILIKE %(pattern)s
+       OR p.description ILIKE %(pattern)s
+       OR p.tags @> ARRAY[%(tag)s]::text[])
+"""
+
+[[query]]
+id = "catalogue-categories"
+title = "Category tree with visible product counts"
+api = "apps/api/src/catalog/categories.service.ts:43 CategoriesService.list"
+params = {}
+sql = """
+SELECT c.*,
+       (SELECT count(*) FROM products AS p
+        WHERE p."categoryId" = c.id AND p."isActive" AND NOT p."isTradeOnly") AS product_count
+FROM categories AS c
+ORDER BY c."displayOrder", c.name
+"""
+
+[[query]]
+id = "catalogue-brands"
+title = "Brand filter with product counts"
+api = "apps/api/src/catalog/products.service.ts:120 ProductsService.brands"
+params = {}
+sql = """
+SELECT p.brand, count(*)
+FROM products AS p
+WHERE p."isActive" AND NOT p."isTradeOnly" AND p.brand IS NOT NULL
+GROUP BY p.brand
+ORDER BY p.brand
+"""
+
+# ─── Back-office dashboard (DashboardService.stats runs all of these per page view) ───
+
+[[query]]
+id = "dashboard-orders-by-status"
+title = "Dashboard: orders by status"
+api = "apps/api/src/dashboard/dashboard.module.ts:42 DashboardService.stats -> order.groupBy"
+params = {}
+sql = """
+SELECT o.status, count(*)
+FROM orders AS o
+GROUP BY o.status
+"""
+
+[[query]]
+id = "dashboard-rfqs-by-status"
+title = "Dashboard: quote requests by status"
+api = "apps/api/src/dashboard/dashboard.module.ts:43 DashboardService.stats -> quoteRequest.groupBy"
+params = {}
+sql = """
+SELECT r.status, count(*)
+FROM quote_requests AS r
+GROUP BY r.status
+"""
+
+[[query]]
+id = "dashboard-quotations-sent"
+title = "Dashboard: quotations awaiting the customer"
+api = "apps/api/src/dashboard/dashboard.module.ts:47 DashboardService.stats -> quotation.count"
+params = {}
+sql = """
+SELECT count(*)
+FROM quotations AS q
+WHERE q.status = 'SENT'
+"""
+
+[[query]]
+id = "dashboard-revenue-30d"
+title = "Dashboard: revenue of the last 30 days"
+api = "apps/api/src/dashboard/dashboard.module.ts:54 DashboardService.stats -> order.aggregate"
+params = { since = "SELECT lab.anchor() - interval '30 days'" }
+sql = """
+SELECT sum(o."totalAmount")
+FROM orders AS o
+WHERE o."createdAt" >= %(since)s
+  AND o.status <> 'CANCELLED'
+"""
+
+[[query]]
+id = "dashboard-orders-30d"
+title = "Dashboard: orders placed in the last 30 days"
+api = "apps/api/src/dashboard/dashboard.module.ts:61 DashboardService.stats -> order.count"
+params = { since = "SELECT lab.anchor() - interval '30 days'" }
+sql = """
+SELECT count(*)
+FROM orders AS o
+WHERE o."createdAt" >= %(since)s
+"""
+
+[[query]]
+id = "dashboard-recent-orders"
+title = "Dashboard: the eight most recent orders"
+api = "apps/api/src/dashboard/dashboard.module.ts:78 DashboardService.stats -> order.findMany"
+params = {}
+sql = """
+SELECT o.*
+FROM orders AS o
+ORDER BY o."createdAt" DESC
+LIMIT 8
+"""
+
+[[query]]
+id = "dashboard-low-stock"
+title = "Dashboard: products at or below their reorder threshold"
+api = "apps/api/src/dashboard/dashboard.module.ts:62 DashboardService.stats -> product.findMany"
+params = {}
+sql = """
+SELECT p.id, p.sku, p.name, p."stockQuantity", p."lowStockThreshold"
+FROM products AS p
+WHERE p."isActive"
+  AND p."stockQuantity" <= p."lowStockThreshold"
+ORDER BY p."stockQuantity" ASC
+LIMIT 10
+"""
+
+# ─── Audit trail (admin) ───────────────────────────────────────────────────
+
+[[query]]
+id = "audit-list"
+title = "Audit trail, newest first, no filter (first page)"
+api = "apps/api/src/audit/audit.controller.ts:35 AuditController.list -> auditLog.findMany"
+params = {}
+sql = """
+SELECT a.*
+FROM audit_logs AS a
+ORDER BY a."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "audit-count"
+title = "Audit trail, total number of entries (pagination total, no filter)"
+api = "apps/api/src/audit/audit.controller.ts:43 AuditController.list -> auditLog.count"
+params = {}
+sql = """
+SELECT count(*)
+FROM audit_logs AS a
+"""
+
+[[query]]
+id = "audit-by-user"
+title = "Audit trail of one user (first page)"
+api = "apps/api/src/audit/audit.controller.ts:35 AuditController.list(userId) -> auditLog.findMany"
+params = { user_id = "SELECT lab.uid('user', lab.retail_user(50, (lab.dataset_size(lab.scale())).n_orgs))" }
+sql = """
+SELECT a.*
+FROM audit_logs AS a
+WHERE a."userId" = %(user_id)s
+ORDER BY a."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "audit-by-user-count"
+title = "Audit trail of one user, number of entries"
+api = "apps/api/src/audit/audit.controller.ts:43 AuditController.list(userId) -> auditLog.count"
+params = { user_id = "SELECT lab.uid('user', lab.retail_user(50, (lab.dataset_size(lab.scale())).n_orgs))" }
+sql = """
+SELECT count(*)
+FROM audit_logs AS a
+WHERE a."userId" = %(user_id)s
+"""
+
+[[query]]
+id = "audit-by-entity"
+title = "Audit trail of one order"
+api = "apps/api/src/audit/audit.controller.ts:35 AuditController.list(entityType, entityId) -> auditLog.findMany"
+params = { entity_id = "SELECT lab.uid('order', 4242)" }
+sql = """
+SELECT a.*
+FROM audit_logs AS a
+WHERE a."entityType" = 'Order'
+  AND a."entityId" = %(entity_id)s
+ORDER BY a."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "audit-by-entity-count"
+title = "Audit trail of one order, number of entries"
+api = "apps/api/src/audit/audit.controller.ts:43 AuditController.list(entityType, entityId) -> auditLog.count"
+params = { entity_id = "SELECT lab.uid('order', 4242)" }
+sql = """
+SELECT count(*)
+FROM audit_logs AS a
+WHERE a."entityType" = 'Order'
+  AND a."entityId" = %(entity_id)s
+"""
+
+[[query]]
+id = "audit-by-action"
+title = "Audit trail filtered by action prefix (approval decisions)"
+api = "apps/api/src/audit/audit.controller.ts:35 AuditController.list(action startsWith) -> auditLog.findMany"
+params = { prefix = "SELECT 'procurement.quotation\\_approval%'" }
+note = "Prisma's startsWith escapes LIKE wildcards, so the underscore is escaped as it would be."
+sql = """
+SELECT a.*
+FROM audit_logs AS a
+WHERE a.action LIKE %(prefix)s
+ORDER BY a."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "audit-by-action-count"
+title = "Audit trail filtered by action prefix, number of entries"
+api = "apps/api/src/audit/audit.controller.ts:43 AuditController.list(action startsWith) -> auditLog.count"
+params = { prefix = "SELECT 'procurement.quotation\\_approval%'" }
+sql = """
+SELECT count(*)
+FROM audit_logs AS a
+WHERE a.action LIKE %(prefix)s
+"""
+
+# ─── Organisations (admin) ─────────────────────────────────────────────────
+
+[[query]]
+id = "organizations-admin-list"
+title = "KYC queue: organisations, pending first, then newest"
+api = "apps/api/src/organizations/organizations.service.ts:161 OrganizationsService.adminList"
+params = {}
+sql = """
+SELECT g.*,
+       (SELECT count(*) FROM organization_members AS m WHERE m."organizationId" = g.id) AS member_count
+FROM organizations AS g
+ORDER BY g.status ASC, g."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+[[query]]
+id = "organizations-admin-count"
+title = "KYC queue, number of organisations (pagination total)"
+api = "apps/api/src/organizations/organizations.service.ts:185 OrganizationsService.adminList -> organization.count"
+params = {}
+sql = """
+SELECT count(*)
+FROM organizations AS g
+"""

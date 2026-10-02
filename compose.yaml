@@ -1,0 +1,188 @@
+# pg-lab services. Drive them with ./lab rather than calling docker compose directly:
+# the script creates .env, waits for health checks and runs the steps in order.
+#
+# Profiles: (none) primary + runner · replica: second node · monitoring: exporters,
+# Prometheus, Grafana. Every port is bound to 127.0.0.1 only.
+#
+# LAB_PROJECT (default pg-lab) names the Compose project, the containers, the volumes and the
+# images, so that two copies of the lab can run on one Docker host with different ports.
+name: ${LAB_PROJECT:-pg-lab}
+
+x-pg-environment: &pg-environment
+  POSTGRES_PASSWORD: ${LAB_POSTGRES_PASSWORD:?run ./lab init to create .env}
+  POSTGRES_INITDB_ARGS: --data-checksums --auth-local=peer --auth-host=scram-sha-256
+  LAB_MIGRATOR_PASSWORD: ${LAB_MIGRATOR_PASSWORD:?run ./lab init}
+  LAB_APP_PASSWORD: ${LAB_APP_PASSWORD:?run ./lab init}
+  LAB_BACKOFFICE_PASSWORD: ${LAB_BACKOFFICE_PASSWORD:?run ./lab init}
+  LAB_ANALYST_PASSWORD: ${LAB_ANALYST_PASSWORD:?run ./lab init}
+  LAB_REPLICATOR_PASSWORD: ${LAB_REPLICATOR_PASSWORD:?run ./lab init}
+  LAB_MONITOR_PASSWORD: ${LAB_MONITOR_PASSWORD:?run ./lab init}
+  LAB_REWIND_PASSWORD: ${LAB_REWIND_PASSWORD:?run ./lab init}
+
+x-pg-node: &pg-node
+  build:
+    context: docker/postgres
+  image: ${LAB_PROJECT:-pg-lab}/postgres:18.6
+  shm_size: 256m
+  mem_limit: ${LAB_PG_MEM_LIMIT:-1g}
+  stop_grace_period: 60s
+  # An init process as PID 1 reaps the processes that docker exec leaves behind (a health check
+  # that outlived its timeout, for example). With postgres as PID 1, PostgreSQL 18 took such an
+  # orphan's exit for a crashed child and restarted every session ("untracked child process").
+  init: true
+  command:
+    - postgres
+    - -c
+    - config_file=/etc/postgresql/postgresql.conf
+    - -c
+    - shared_buffers=${LAB_SHARED_BUFFERS:-256MB}
+    - -c
+    - effective_cache_size=${LAB_EFFECTIVE_CACHE_SIZE:-768MB}
+    - -c
+    - maintenance_work_mem=${LAB_MAINTENANCE_WORK_MEM:-128MB}
+    - -c
+    - work_mem=${LAB_WORK_MEM:-8MB}
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready --quiet --host=127.0.0.1 --username=postgres --dbname=postgres"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+    start_period: 120s
+
+services:
+  pg1:
+    <<: *pg-node
+    container_name: ${LAB_PROJECT:-pg-lab}-pg1
+    hostname: pg1
+    environment:
+      <<: *pg-environment
+      LAB_NODE: pg1
+      LAB_PEER: pg2
+      # How an empty data directory is filled: initdb (primary) or a clone of the peer.
+      LAB_BOOTSTRAP: ${LAB_PG1_BOOTSTRAP:-primary}
+    ports:
+      - "127.0.0.1:${LAB_PG1_PORT:-55432}:5432"
+    volumes:
+      - pg1-data:/var/lib/postgresql
+      - backrest:/var/lib/pgbackrest
+
+  pg2:
+    <<: *pg-node
+    container_name: ${LAB_PROJECT:-pg-lab}-pg2
+    hostname: pg2
+    profiles: [replica]
+    mem_limit: ${LAB_PG2_MEM_LIMIT:-768m}
+    environment:
+      <<: *pg-environment
+      LAB_NODE: pg2
+      LAB_PEER: pg1
+      LAB_BOOTSTRAP: ${LAB_PG2_BOOTSTRAP:-replica}
+    ports:
+      - "127.0.0.1:${LAB_PG2_PORT:-55433}:5432"
+    volumes:
+      - pg2-data:/var/lib/postgresql
+      - backrest:/var/lib/pgbackrest
+
+  # Tools container: psql, pgbench, pg_prove and the pglab Python package. It connects to
+  # whichever node is the primary (libpq multi-host with target_session_attrs=read-write).
+  runner:
+    build:
+      context: .
+      dockerfile: docker/runner/Dockerfile
+    image: ${LAB_PROJECT:-pg-lab}/runner:dev
+    container_name: ${LAB_PROJECT:-pg-lab}-runner
+    init: true
+    command: ["sleep", "infinity"]
+    # The runner writes into the bind-mounted repository (reports, drill logs, caches). It runs
+    # as the user who called ./lab (LAB_UID and LAB_GID, exported by ./lab), so that on a Linux
+    # host those files belong to that user and not to root.
+    user: "${LAB_UID:-1000}:${LAB_GID:-1000}"
+    mem_limit: ${LAB_RUNNER_MEM_LIMIT:-512m}
+    working_dir: /work
+    environment:
+      HOME: /tmp
+      PGHOST: pg1,pg2
+      PGPORT: "5432,5432"
+      PGDATABASE: topflow
+      PGUSER: postgres
+      PGPASSWORD: ${LAB_POSTGRES_PASSWORD}
+      PGTARGETSESSIONATTRS: read-write
+      PGCONNECT_TIMEOUT: "3"
+      PGAPPNAME: pglab-runner
+      LAB_MIGRATOR_PASSWORD: ${LAB_MIGRATOR_PASSWORD}
+      LAB_APP_PASSWORD: ${LAB_APP_PASSWORD}
+      LAB_BACKOFFICE_PASSWORD: ${LAB_BACKOFFICE_PASSWORD}
+      LAB_ANALYST_PASSWORD: ${LAB_ANALYST_PASSWORD}
+      LAB_MONITOR_PASSWORD: ${LAB_MONITOR_PASSWORD}
+      LAB_SCALE: ${LAB_SCALE:-100000}
+    volumes:
+      - .:/work
+
+  exporter-pg1:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    container_name: ${LAB_PROJECT:-pg-lab}-exporter-pg1
+    profiles: [monitoring]
+    mem_limit: 96m
+    command: ["--collector.stat_statements", "--collector.long_running_transactions", "--collector.stat_activity_autovacuum"]
+    environment:
+      DATA_SOURCE_URI: pg1:5432/topflow?sslmode=disable
+      DATA_SOURCE_USER: monitor
+      DATA_SOURCE_PASS: ${LAB_MONITOR_PASSWORD}
+
+  exporter-pg2:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    container_name: ${LAB_PROJECT:-pg-lab}-exporter-pg2
+    profiles: [monitoring]
+    mem_limit: 96m
+    command: ["--collector.stat_statements", "--collector.long_running_transactions", "--collector.stat_activity_autovacuum"]
+    environment:
+      DATA_SOURCE_URI: pg2:5432/topflow?sslmode=disable
+      DATA_SOURCE_USER: monitor
+      DATA_SOURCE_PASS: ${LAB_MONITOR_PASSWORD}
+
+  prometheus:
+    build:
+      context: .
+      dockerfile: docker/prometheus/Dockerfile
+    image: ${LAB_PROJECT:-pg-lab}/prometheus:v3.15.0
+    container_name: ${LAB_PROJECT:-pg-lab}-prometheus
+    profiles: [monitoring]
+    mem_limit: 256m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+    ports:
+      - "127.0.0.1:${LAB_PROMETHEUS_PORT:-55490}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+
+  grafana:
+    build:
+      context: .
+      dockerfile: docker/grafana/Dockerfile
+    image: ${LAB_PROJECT:-pg-lab}/grafana:13.2.2
+    container_name: ${LAB_PROJECT:-pg-lab}-grafana
+    profiles: [monitoring]
+    mem_limit: 512m
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${LAB_GRAFANA_PASSWORD:?run ./lab init}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/postgres-overview.json
+    ports:
+      - "127.0.0.1:${LAB_GRAFANA_PORT:-55430}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  pg1-data:
+  pg2-data:
+  backrest:
+  prometheus-data:
+  grafana-data:

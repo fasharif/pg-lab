@@ -1,0 +1,110 @@
+query = "orders-admin-search"
+fix_kind = "`pg_trgm` GIN indexes and a rewrite of the OR across relations into a UNION"
+
+problem = """
+`ILIKE '%term%'` has a wildcard at the start, so no B-tree index can help: every order is read
+and five patterns are tested on each. The customer-name and company-name conditions are
+`IN (subquery)` inside the same OR, which forces a filter on each order row rather than an
+index lookup. Adding indexes alone does not change that: as long as the OR mixes columns of
+`orders` with conditions on other tables, the planner has to scan `orders`.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_orderNumber_trgm_idx" ON orders USING gin ("orderNumber" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_purchaseOrderNumber_trgm_idx" ON orders USING gin ("purchaseOrderNumber" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_projectReference_trgm_idx" ON orders USING gin ("projectReference" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "users_fullName_trgm_idx" ON users USING gin ("fullName" gin_trgm_ops)''',
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "organizations_name_trgm_idx" ON organizations USING gin (name gin_trgm_ops)''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "orders_orderNumber_trgm_idx"''',
+    '''DROP INDEX CONCURRENTLY IF EXISTS "orders_purchaseOrderNumber_trgm_idx"''',
+    '''DROP INDEX CONCURRENTLY IF EXISTS "orders_projectReference_trgm_idx"''',
+    '''DROP INDEX CONCURRENTLY IF EXISTS "users_fullName_trgm_idx"''',
+    '''DROP INDEX CONCURRENTLY IF EXISTS "organizations_name_trgm_idx"''',
+]
+
+rewrite = """
+WITH hits AS (
+    SELECT o.id
+    FROM orders AS o
+    WHERE o."orderNumber" ILIKE %(pattern)s
+       OR o."purchaseOrderNumber" ILIKE %(pattern)s
+       OR o."projectReference" ILIKE %(pattern)s
+    UNION
+    SELECT o.id
+    FROM orders AS o
+    JOIN users AS u ON u.id = o."userId"
+    WHERE u."fullName" ILIKE %(pattern)s
+    UNION
+    SELECT o.id
+    FROM orders AS o
+    JOIN organizations AS g ON g.id = o."organizationId"
+    WHERE g.name ILIKE %(pattern)s
+)
+SELECT o.*
+FROM orders AS o
+JOIN hits AS h ON h.id = o.id
+ORDER BY o."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+tradeoff = """
+Trigram GIN indexes answer `ILIKE '%term%'` by intersecting the posting lists of the term's
+three-letter sequences; the matches are then rechecked against the real pattern. The rewrite
+gives each condition its own branch: the order columns combine in a BitmapOr, and names are
+looked up in `users` and `organizations` first and joined to their orders through the existing
+foreign-key indexes. The result is the same set of orders. The pagination total needs the same
+rewrite: with the indexes alone, the count keeps the OR across tables and still reads every
+order.
+
+Costs. Three GIN indexes on `orders` make every insert, and every update of those columns,
+more expensive, and GIN indexes are large compared with the columns they cover (sizes in
+`docs/indexing.md`). `fastupdate` (on by default) batches GIN insertions in a pending list,
+which keeps inserts cheap but makes searches slower until autovacuum merges the list. Prisma
+cannot express the UNION, so `OrdersService.list()` would call `$queryRaw` for searches, for
+the page and its total.
+Terms shorter than three characters produce no trigrams and fall back to a scan; the API
+should require at least three.
+"""
+
+[before]
+seq_scan_on = ["orders"]
+
+[after]
+index_used = ["orders_orderNumber_trgm_idx"]
+no_seq_scan_on = ["orders"]
+
+# The endpoint's pagination total: OrdersService.list() runs the same filter as a count(*) in
+# the same transaction. The trigram indexes alone leave it a sequential scan (the OR still mixes
+# tables), so it takes the same UNION and counts the matching ids.
+[total]
+query = "orders-admin-search-count"
+rewrite = """
+WITH hits AS (
+    SELECT o.id
+    FROM orders AS o
+    WHERE o."orderNumber" ILIKE %(pattern)s
+       OR o."purchaseOrderNumber" ILIKE %(pattern)s
+       OR o."projectReference" ILIKE %(pattern)s
+    UNION
+    SELECT o.id
+    FROM orders AS o
+    JOIN users AS u ON u.id = o."userId"
+    WHERE u."fullName" ILIKE %(pattern)s
+    UNION
+    SELECT o.id
+    FROM orders AS o
+    JOIN organizations AS g ON g.id = o."organizationId"
+    WHERE g.name ILIKE %(pattern)s
+)
+SELECT count(*)
+FROM hits
+"""
+
+[total.before]
+seq_scan_on = ["orders"]
+
+[total.after]
+index_used = ["orders_orderNumber_trgm_idx"]
+no_seq_scan_on = ["orders"]

@@ -1,0 +1,31 @@
+# SQL Server chapter (written, not run). Used only through ./lab sqlserver, which refuses
+# to start unless you set MSSQL_ACCEPT_EULA=Y yourself: running SQL Server means accepting
+# Microsoft's licence terms. See docs/sqlserver.md.
+name: ${LAB_PROJECT:-pg-lab}-mssql
+
+services:
+  mssql:
+    build:
+      context: .
+    image: ${LAB_PROJECT:-pg-lab}/mssql:2022-cu27-fts
+    container_name: ${LAB_PROJECT:-pg-lab}-mssql
+    mem_limit: ${LAB_MSSQL_MEM_LIMIT:-3g}
+    environment:
+      ACCEPT_EULA: ${MSSQL_ACCEPT_EULA:?set MSSQL_ACCEPT_EULA=Y yourself to accept the SQL Server licence}
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${LAB_MSSQL_SA_PASSWORD:?run ./lab init}
+      MSSQL_MEMORY_LIMIT_MB: "2048"
+    ports:
+      - "127.0.0.1:${LAB_MSSQL_PORT:-55414}:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      # The password reaches sqlcmd through SQLCMDPASSWORD, not its command line.
+      test: ["CMD-SHELL", "SQLCMDPASSWORD=\"$${MSSQL_SA_PASSWORD}\" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+volumes:
+  mssql-data:

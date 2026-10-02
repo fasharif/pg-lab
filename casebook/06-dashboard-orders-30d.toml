@@ -1,0 +1,20 @@
+query = "dashboard-orders-30d"
+fix_kind = "B-tree index on `createdAt` (the covering index added in case 7)"
+fixed_by = 7
+
+problem = """
+The dashboard counts the orders of the last 30 days. Without an index on `createdAt`, the
+count reads the whole table to keep about 4% of it.
+"""
+
+tradeoff = """
+The count needs only `createdAt`, so the index from case 7 answers it from the index alone,
+reading only the last 30 days of entries.
+"""
+
+[before]
+seq_scan_on = ["orders"]
+
+[after]
+index_used = ["orders_createdAt_idx"]
+no_seq_scan_on = ["orders"]

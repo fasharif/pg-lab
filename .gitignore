@@ -12,7 +12,7 @@ __pycache__/
 build/
 dist/
 
-# Lab output produced by runs (reports that are meant to be kept live in docs/)
+# Lab output produced by runs (./lab ci writes here); the reports that are kept live in reports/
 /out/
 
 # Editors and OS files

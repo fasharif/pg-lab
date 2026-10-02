@@ -1,0 +1,40 @@
+query = "dashboard-revenue-30d"
+fix_kind = "Covering B-tree index: `createdAt` with `INCLUDE (status, totalAmount)`"
+
+problem = """
+Revenue of the last 30 days sums `totalAmount` over orders that are not cancelled. With no
+index on `createdAt`, every order is read. The same missing index slows two more dashboard
+statements (cases 5 and 6).
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "orders_createdAt_idx" ON orders ("createdAt") INCLUDE (status, "totalAmount")''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "orders_createdAt_idx"''',
+]
+
+tradeoff = """
+`INCLUDE` stores `status` and `totalAmount` in the index leaf pages without making them part
+of the key, so the sum is computed from the index alone (an index-only scan) as long as the
+visibility map is current, which autovacuum maintains on an insert-mostly table. One index
+serves three dashboard statements: this sum, the 30-day count (case 6) and the eight newest
+orders (case 5). Prisma's `@@index` has no `INCLUDE`, so the index goes in a raw SQL migration
+under Prisma's default name.
+
+Alternatives considered. A BRIN index on `createdAt` is tiny because orders arrive in time
+order, and it would serve the two 30-day statements with a bitmap heap scan. It cannot return
+rows in order, though, so case 5 would still need a B-tree, and the BRIN would then be
+redundant. A materialised view of daily totals would make the dashboard cheaper still, but it
+answers "the last 30 calendar days as of the last refresh" rather than "the last 30 days", and
+every refresh reads the whole table. With an index-only scan over one month of entries, a
+materialised view is not justified at this scale.
+"""
+
+[before]
+seq_scan_on = ["orders"]
+
+[after]
+index_used = ["orders_createdAt_idx"]
+node_present = ["Index Only Scan"]
+no_seq_scan_on = ["orders"]

@@ -1,0 +1,52 @@
+# What each SQL Server plan should show after the fixes (sqlserver/sql/20_fixes.sql),
+# checked by `python -m pglab mssql-report`. Written before SQL Server was run: these are the
+# expected plans, to be confirmed by the first run (docs/sqlserver.md).
+#
+# index_used: an index the after plan must read; index_not_used: one it must not read;
+# operator_absent: physical operators that must be gone (for example a sort).
+
+[case.01]
+title = "Audit trail filtered by action prefix, number of entries"
+index_used = ["audit_logs_action_idx"]
+
+[case.02]
+title = "Audit trail of one user, number of entries"
+index_used = ["audit_logs_userId_createdAt_idx"]
+
+[case.03]
+title = "Audit trail of one user (first page)"
+index_used = ["audit_logs_userId_createdAt_idx"]
+operator_absent = ["Sort", "Top N Sort"]
+
+[case.04]
+title = "Back-office order search (full-text rewrite)"
+operator_absent = ["Clustered Index Scan"]
+
+[case.05]
+title = "Dashboard: the eight most recent orders"
+index_used = ["orders_createdAt_idx"]
+operator_absent = ["Sort", "Top N Sort"]
+
+[case.06]
+title = "Dashboard: orders placed in the last 30 days"
+index_used = ["orders_createdAt_idx"]
+
+[case.07]
+title = "Dashboard: revenue of the last 30 days"
+index_used = ["orders_createdAt_idx"]
+operator_absent = ["Key Lookup", "Clustered Index Scan"]
+
+[case.08]
+title = "Order history of an organisation (first page)"
+index_used = ["orders_organizationId_createdAt_idx"]
+operator_absent = ["Sort", "Top N Sort"]
+
+[case.09]
+title = "Category tree with visible product counts"
+index_used = ["products_categoryId_visible_idx"]
+
+[case.10]
+title = "Back-office quotations in one status"
+index_used = ["quotations_status_updatedAt_idx"]
+index_not_used = ["quotations_status_idx"]
+operator_absent = ["Sort", "Top N Sort"]

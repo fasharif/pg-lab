@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its running checks; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  static:
+    name: Static checks and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+          python-version: "3.14"
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Format and lint (ruff)
+        run: |
+          uv run ruff format --check src tests
+          uv run ruff check src tests
+
+      - name: Type check (mypy --strict)
+        run: uv run mypy
+
+      - name: Unit tests
+        run: uv run pytest -m "not integration"
+
+      - name: Workload and casebook definitions
+        run: uv run python -m pglab validate
+
+      - name: SQL syntax (sqlfluff)
+        run: |
+          uv run sqlfluff lint --dialect postgres --rules LT12 sql/lab sql/security sql/partitioning
+          uv run sqlfluff lint --dialect tsql --rules LT12 sqlserver/sql
+
+      - name: Prometheus configuration, alert rules and their unit tests (promtool)
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p --entrypoint promtool \
+            prom/prometheus:v3.15.0 check config prometheus.yml
+          docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p --entrypoint promtool \
+            prom/prometheus:v3.15.0 check rules rules/postgres.yml
+          docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p --entrypoint promtool \
+            prom/prometheus:v3.15.0 test rules tests/postgres_test.yml
+
+      - name: Shell scripts (shellcheck)
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 --external-sources \
+            lab scripts/*.sh docker/postgres/*.sh docker/postgres/initdb/*.sh
+
+      - name: Workflows (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+  lab:
+    name: Lab at small scale (schema, data, casebook, partitions, RLS, PITR, switchover, failover, monitoring)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LAB_SCALE: "100000"
+      LAB_ENVIRONMENT_NOTE: GitHub-hosted runner, functional run
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create .env with random passwords
+        run: ./lab init
+
+      - name: Run the lab end to end
+        run: ./lab ci
+
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          for name in $(docker ps -a --filter label=com.docker.compose.project=pg-lab --format '{{.Names}}'); do
+            echo "::group::$name"
+            docker logs --tail 200 "$name" || true
+            echo "::endgroup::"
+          done
+
+      - name: Keep reports and drill evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lab-reports
+          path: |
+            out/reports/
+            out/drills/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop the lab
+        if: always()
+        run: ./lab down

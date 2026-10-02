@@ -1,0 +1,36 @@
+query = "quotations-admin-by-status"
+chosen_by = "buffers"
+fix_kind = "Composite B-tree index `(status, updatedAt)` replacing the single-column one"
+
+problem = """
+The quotations list filters by status and sorts by `updatedAt`. TopFlow's index on `status`
+finds every quotation in that status (thousands for `SENT`, because open quotations keep that
+status until someone opens them after their validity date), fetches each from the heap and
+sorts them all to return 20.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "quotations_status_updatedAt_idx" ON quotations (status, "updatedAt")''',
+    '''DROP INDEX CONCURRENTLY IF EXISTS "quotations_status_idx"''',
+]
+revert = [
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "quotations_status_idx" ON quotations (status)''',
+    '''DROP INDEX CONCURRENTLY IF EXISTS "quotations_status_updatedAt_idx"''',
+]
+
+tradeoff = """
+The composite index returns the newest 20 quotations of a status straight from the index. It
+also makes the single-column index redundant, because any query that could use `(status)`
+can use `(status, updatedAt)`, so the fix drops it and the table keeps the same number of
+indexes. The dashboard's count of `SENT` quotations now reads the wider index, a few more
+pages. In `schema.prisma`, `@@index([status])` becomes `@@index([status, updatedAt])`.
+"""
+
+[before]
+index_used = ["quotations_status_idx"]
+node_present = ["Sort"]
+
+[after]
+index_used = ["quotations_status_updatedAt_idx"]
+index_not_used = ["quotations_status_idx"]
+node_absent = ["Sort"]

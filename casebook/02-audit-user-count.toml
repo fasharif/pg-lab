@@ -1,0 +1,23 @@
+query = "audit-by-user-count"
+fix_kind = "Composite B-tree index (the one added in case 3)"
+fixed_by = 3
+
+problem = """
+Counting one user's audit entries has no index to use, so PostgreSQL reads every row of
+`audit_logs` in parallel and keeps a few dozen. The page query of the same screen (case 3) has
+the same missing index.
+"""
+
+tradeoff = """
+The index from case 3 starts with `userId`, so the count becomes a range scan of that user's
+index entries. Because the table is vacuumed, the visibility map lets the scan skip the heap.
+One index serves both statements of the endpoint, which is the reason to choose
+`("userId", "createdAt")` over an index on `userId` alone.
+"""
+
+[before]
+seq_scan_on = ["audit_logs"]
+
+[after]
+index_used = ["audit_logs_userId_createdAt_idx"]
+no_seq_scan_on = ["audit_logs"]

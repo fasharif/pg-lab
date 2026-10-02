@@ -1,0 +1,97 @@
+query = "rfq-admin-search"
+chosen_by = "time"
+fix_kind = "One multicolumn `pg_trgm` GIN index over five columns and a UNION rewrite, with case 4's index on organisation names"
+
+problem = """
+The sales team's search tests six `ILIKE '%term%'` conditions: the RFQ number, the project
+reference, the website visitor's name, e-mail address and company, and the name of the
+organisation that sent the request. A leading wildcard rules out B-tree indexes, and the
+organisation name is an `IN (subquery)` inside the same OR, so the plan reads every quote
+request and tests the patterns row by row. At SCALE=1000000 it ranked 13th by buffers, below
+every case chosen that way, but it spends its time on the pattern tests rather than on reading
+pages, which is why only the measured run ranked it among the ten slowest statements.
+"""
+
+fix = [
+    '''CREATE INDEX CONCURRENTLY IF NOT EXISTS "quote_requests_search_trgm_idx" ON quote_requests USING gin (number gin_trgm_ops, "projectReference" gin_trgm_ops, "contactName" gin_trgm_ops, "contactEmail" gin_trgm_ops, "companyName" gin_trgm_ops)''',
+]
+revert = [
+    '''DROP INDEX CONCURRENTLY IF EXISTS "quote_requests_search_trgm_idx"''',
+]
+
+rewrite = """
+WITH hits AS (
+    SELECT r.id
+    FROM quote_requests AS r
+    WHERE r.number ILIKE %(pattern)s
+       OR r."projectReference" ILIKE %(pattern)s
+       OR r."contactName" ILIKE %(pattern)s
+       OR r."contactEmail" ILIKE %(pattern)s
+       OR r."companyName" ILIKE %(pattern)s
+    UNION
+    SELECT r.id
+    FROM quote_requests AS r
+    JOIN organizations AS g ON g.id = r."organizationId"
+    WHERE g.name ILIKE %(pattern)s
+)
+SELECT r.*
+FROM quote_requests AS r
+JOIN hits AS h ON h.id = r.id
+ORDER BY r."createdAt" DESC
+LIMIT 20 OFFSET 0
+"""
+
+tradeoff = """
+A GIN index can hold several columns, and unlike a B-tree it serves a condition on any of them
+equally well, so one index answers all five patterns on `quote_requests`: the plan combines
+five bitmap scans of the same index in a BitmapOr and rechecks the candidates against the real
+patterns. Organisation names use the trigram index that case 4 adds to `organizations`, and
+the matching organisations' requests come through TopFlow's `(organizationId, status)` index.
+As in case 4, the rewrite gives the organisation branch its own UNION arm; with the index
+alone the OR still mixes tables and the plan keeps scanning every request. The pagination
+total takes the same rewrite.
+
+Costs. One index instead of five, but not five times smaller: every trigram of every searched
+column is still an entry, so each new or edited quote request writes as many index entries as
+five separate indexes would (WAL per inserted row in `reports/indexing.md`). Quote requests
+are written far less often than they are searched by the sales team, which is the case for
+paying it. Prisma cannot express the UNION, so `RfqService.adminList()` would call
+`$queryRaw` for searches, for the page and its total. Terms shorter than three characters
+produce no trigrams and fall back to a scan, as in case 4.
+"""
+
+[before]
+seq_scan_on = ["quote_requests"]
+
+[after]
+index_used = ["quote_requests_search_trgm_idx"]
+no_seq_scan_on = ["quote_requests"]
+
+# RfqService.list() runs the same filter as a count(*) for the pager.
+[total]
+query = "rfq-admin-search-count"
+rewrite = """
+WITH hits AS (
+    SELECT r.id
+    FROM quote_requests AS r
+    WHERE r.number ILIKE %(pattern)s
+       OR r."projectReference" ILIKE %(pattern)s
+       OR r."contactName" ILIKE %(pattern)s
+       OR r."contactEmail" ILIKE %(pattern)s
+       OR r."companyName" ILIKE %(pattern)s
+    UNION
+    SELECT r.id
+    FROM quote_requests AS r
+    JOIN organizations AS g ON g.id = r."organizationId"
+    WHERE g.name ILIKE %(pattern)s
+)
+SELECT count(*)
+FROM hits
+"""
+
+[total.before]
+seq_scan_on = ["quote_requests"]
+
+[total.after]
+index_used = ["quote_requests_search_trgm_idx"]
+no_seq_scan_on = ["quote_requests"]
