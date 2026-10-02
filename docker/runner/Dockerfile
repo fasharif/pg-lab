@@ -4,7 +4,7 @@
 FROM postgres:18.6-trixie AS pgdg
 FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
-FROM python:3.14.7-slim-trixie
+FROM python:3.15.0rc2-slim-trixie
 
 # Reuse the PGDG signing key shipped in the official postgres image instead of fetching it.
 COPY --from=pgdg /usr/local/share/keyrings/postgres.gpg.asc /usr/local/share/keyrings/postgres.gpg.asc
