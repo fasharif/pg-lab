@@ -1,15 +1,15 @@
 # Indexing strategy
 
 What to index in TopFlow's database, what not to, and what each index costs on writes. Figures
-come from `reports/indexing.md` (`./lab indexing`, SCALE=1000000, PostgreSQL 18.6, 2026-09-27)
+come from `reports/indexing.md` (`./lab indexing`, SCALE=10000000, PostgreSQL 18.6, 2026-10-02)
 unless a section gives its own command. Sizes are of freshly built indexes.
 
 ## Start from the statements, not the columns
 
 Every index in the lab answers a statement the API sends (`workload/queries.toml`); nothing is
 indexed because a column "looks important". The workload ranking (`reports/workload.md`) shows
-which statements do the most work, and the casebook fixes the heaviest of them (ten cases; case
-4 also fixes the search's pagination count). The rules that came out of it:
+which statements do the most work, and the casebook fixes the heaviest of them (eleven cases;
+cases 4 and 11 also fix their search's pagination count). The rules that came out of it:
 
 1. **Equality columns first, then the column you sort or range on.** `(organizationId, createdAt)`
    returns an organisation's newest 20 orders from the index alone, whatever the size of its
@@ -24,15 +24,16 @@ which statements do the most work, and the casebook fixes the heaviest of them (
 4. **Partial indexes when every query carries the same predicate.** The storefront only counts
    active, non-trade products; the partial index holds exactly those, and each category count
    becomes an index-only scan (case 9).
-5. **Match the operator.** `ILIKE '%term%'` needs trigrams (pg_trgm GIN, case 4), and
+5. **Match the operator.** `ILIKE '%term%'` needs trigrams (pg_trgm GIN, cases 4 and 11), and
    `LIKE 'prefix%'` under the `en_US.utf8` collation needs `text_pattern_ops` (case 1). A plain
-   B-tree helps neither.
+   B-tree helps neither. A GIN index can hold several columns and serves a condition on any of
+   them, so one index covers the RFQ search's five columns (case 11).
 6. **Replace, do not accumulate.** `(status, updatedAt)` makes TopFlow's `(status)` redundant, so
    case 10 drops it and the table keeps the same number of indexes.
 
 ## What not to index
 
-- **Booleans and low-selectivity flags on their own.** 97.4% of products are active, so an
+- **Booleans and low-selectivity flags on their own.** 97.1% of products are active, so an
   index on `isActive` can only help the rare query for inactive products: the storefront listing
   scans the table, and no plan in `reports/workload.md` uses `products_isActive_idx`. The
   partial index of case 9 is the useful form of that predicate.
@@ -52,7 +53,7 @@ These two checks reproduce the first two points on a seeded lab:
 EXPLAIN (COSTS OFF) SELECT * FROM products
 WHERE brand ILIKE 'Aqualine' AND "isActive" AND NOT "isTradeOnly";          -- Seq Scan on products
 
-SELECT round(100.0 * count(*) FILTER (WHERE "isActive") / count(*), 1) FROM products;  -- 97.4
+SELECT round(100.0 * count(*) FILTER (WHERE "isActive") / count(*), 1) FROM products;  -- 97.1
 ```
 
 ## What the indexes cost
@@ -61,20 +62,21 @@ SELECT round(100.0 * count(*) FILTER (WHERE "isActive") / count(*), 1) FROM prod
 
 | Index (after the casebook) | Size | Table size |
 | --- | ---: | ---: |
-| `audit_logs_userId_createdAt_idx` (case 3) | 64.7 MB | `audit_logs`: 263 MB |
-| `audit_logs_action_pattern_idx` (case 1) | 6.8 MB | |
-| `orders_organizationId_createdAt_idx` with `INCLUDE (userId)` (case 8) | 18.9 MB | `orders`: 84.2 MB |
-| `orders_createdAt_idx` with `INCLUDE` (case 7) | 7.8 MB | |
-| three trigram GIN indexes on `orders` (case 4) | 6.1 + 7.1 + 4.1 MB | |
-| `products_categoryId_visible_idx` (case 9) | 48 kB | `products`: 2.0 MB |
+| `audit_logs_userId_createdAt_idx` (case 3) | 647 MB | `audit_logs`: 2.6 GB |
+| `audit_logs_action_pattern_idx` (case 1) | 67.9 MB | |
+| `orders_organizationId_createdAt_idx` with `INCLUDE (userId)` (case 8) | 188 MB | `orders`: 842 MB |
+| `orders_createdAt_idx` with `INCLUDE` (case 7) | 77.3 MB | |
+| three trigram GIN indexes on `orders` (case 4): order, PO and project numbers | 57.7 + 44.9 + 38.9 MB | |
+| `quote_requests_search_trgm_idx`, one GIN index on five columns (case 11) | 102 MB | `quote_requests`: 359 MB |
+| `products_categoryId_visible_idx` (case 9) | 304 kB | `products`: 19.5 MB |
 
-After the casebook, all indexes on `audit_logs` together take 181 MB, 0.69 times the table; on
-`orders`, 72.1 MB, 0.86 times the table.
+After the casebook, all indexes on `audit_logs` together take 1.8 GB, 0.69 times the table; on
+`orders`, 689 MB, 0.82 times the table; on `quote_requests`, 257 MB, 0.72 times the table.
 
 The largest single cost is the id type. TopFlow's ids are UUIDs stored as `TEXT` (36 characters),
 so every primary key, foreign key and composite index that contains an id carries 37 bytes per
-entry instead of 16. The same one million audit ids take 56.3 MB in the primary key's text index
-and 30.1 MB in an index on the ids cast to `uuid` (`reports/indexing.md`, "Alternatives
+entry instead of 16. The same ten million audit ids take 563 MB in the primary key's text index
+and 301 MB in an index on the ids cast to `uuid` (`reports/indexing.md`, "Alternatives
 measured"):
 
 ```sql
@@ -93,31 +95,35 @@ each right after a `CHECKPOINT`:
 
 | Table | Indexes before | WAL per row before | Indexes after | WAL per row after | Change |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `audit_logs` | 3 | 1,860 B | 5 | 2,115 B | +14% |
-| `orders` | 6 | 3,257 B | 11 | 4,750 B | +46% |
+| `audit_logs` | 3 | 4,074 B | 5 | 4,333 B | +6% |
+| `orders` | 6 | 8,212 B | 11 | 9,693 B | +18% |
+| `quote_requests` | 6 | 4,657 B | 7 | 7,423 B | +59% |
 
-Both states write thousands of full-page images per probe (about 3,900 for `orders`, from
-the report): indexes with scattered keys (ids, `entityId`) change a different page for nearly
-every row, and the first change to a page after a checkpoint writes the whole page (compressed
-here, `wal_compression = zstd`). The number of full-page images barely changes with the
-casebook's indexes, so the extra WAL is mostly their own index records. The five indexes added
-to `orders` are the three trigram GIN indexes of case 4 and the B-trees of cases 7 and 8. GIN's
-`fastupdate` (on by default) appends new entries to a pending list and merges them later, which
-keeps each insert cheap but moves the cost to vacuum or to the insert that overflows the list
-(`gin_pending_list_limit`).
+Full-page images are most of this volume. Indexes with scattered keys (ids, `entityId`) change a
+different page for nearly every row, and the first change to a page after a checkpoint writes
+the whole page (compressed here, `wal_compression = zstd`): a probe of 5,000 orders writes about
+11,000 of them, two per row, before and after the casebook (10,930 and 11,081 in the report).
+For `audit_logs` and `orders` that number barely changes with the casebook's indexes, so their
+extra WAL is mostly the new indexes' own records. The five indexes added to `orders` are the
+three trigram GIN indexes of case 4 and the B-trees of cases 7 and 8. `quote_requests` is the
+exception: with case 11's five-column GIN index its full-page images rise from 5,289 to 9,015
+per probe, which is most of its +59%. GIN's `fastupdate` (on by default) appends new entries to a
+pending list and merges them later, which keeps most inserts cheap but moves the cost to vacuum
+or to the insert that overflows the list (`gin_pending_list_limit`).
 
 For TopFlow the trade-off is acceptable: orders are written a few times in their life and read
-on every page view, and audit entries are written once. The order search is the fix to revisit
-first if write volume grows, for example by searching order and PO numbers by prefix with
-B-trees and keeping trigrams for names only.
+on every page view, audit entries are written once, and quote requests far less often than the
+sales team searches them. The two searches are the fixes to revisit first if write volume grows,
+for example by searching order, PO and RFQ numbers by prefix with B-trees and keeping trigrams
+for names only.
 
 ### Alternatives measured
 
 | Alternative | Size | Index it would replace |
 | --- | ---: | ---: |
-| BRIN on `orders.createdAt` | 24 kB | `orders_createdAt_idx`, 7.8 MB |
-| BRIN on `audit_logs.createdAt` | 24 kB | `audit_logs_createdAt_idx`, 21.4 MB |
-| case 8 without `INCLUDE (userId)` | 10.2 MB | `orders_organizationId_createdAt_idx`, 18.9 MB |
+| BRIN on `orders.createdAt` | 40 kB | `orders_createdAt_idx`, 77.3 MB |
+| BRIN on `audit_logs.createdAt` | 104 kB | `audit_logs_createdAt_idx`, 214 MB |
+| case 8 without `INCLUDE (userId)` | 102 MB | `orders_organizationId_createdAt_idx`, 188 MB |
 
 BRIN stores one summary per block range, which works here because rows are inserted in
 `createdAt` order. It serves range filters (a bitmap scan of the matching ranges) but cannot return
@@ -128,8 +134,8 @@ sorted; ADR 7 in docs/decisions.md records why the covering B-tree won for `orde
 `userId` nearly doubles case 8's index, because the ids are 36-character text. It is there for
 row-level security: the API role's policy reads `organizationId` and `userId`, and without
 `userId` in the index the organisation's order count visits every one of its orders in the heap
-(6,764 buffers against 143 in `reports/rls-plans.md`). A database without RLS on `orders`
-would not need it.
+(34,029 buffers against 558, and 65 ms against 19 ms, in `reports/rls-plans.md`). A database
+without RLS on `orders` would not need it.
 
 ## Building and removing indexes in production
 

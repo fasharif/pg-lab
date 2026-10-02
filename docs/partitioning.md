@@ -48,6 +48,24 @@ the casebook's. With the casebook's indexes, the plain table reads about as few 
 partitioned one for these statements, and the last statement shows the cost of partitioning: a
 query without the partition key visits every partition's index.
 
+The measured run at SCALE=10000000 (`./lab partition --measure`, medians of 15 runs of planning
+plus execution) confirms it in time:
+
+| Statement | Plain, TopFlow's indexes | Plain, casebook's indexes | Partitioned |
+| --- | ---: | ---: | ---: |
+| Dashboard revenue of the last 30 days | 337 ms | 9.5 ms | 11.2 ms |
+| One organisation's orders in the last full month | 48.6 ms | 3.4 ms | 3.0 ms |
+| Audit entries of one day | 1.5 ms | 1.3 ms | 0.098 ms |
+| Orders of the last 7 days, generic plan | 356 ms | 7.5 ms | 8.5 ms |
+| Order history with no date filter | 65.2 ms | 0.101 ms | 0.845 ms |
+
+The indexes, not the partitions, remove most of the time. The one-day audit lookup is faster on
+the partitioned table mainly because its planning is: 1.2 ms of the plain table's 1.3 ms is
+planning, against 0.056 ms on the partitions. The query without the partition key pays for the
+28 partitions in planning (0.732 ms of its 0.845 ms). Retention is where partitioning clearly
+wins: detaching the oldest month of 410,960 audit entries wrote 30,072 bytes of WAL, deleting
+them from the plain table 72,959,563 bytes.
+
 ## Retention
 
 The report compares two ways of removing the oldest full month of audit entries: a `DELETE` on

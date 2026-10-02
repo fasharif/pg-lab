@@ -54,7 +54,9 @@ function that fills `order_items`, so headers always match their lines. Secondar
 foreign keys are dropped for the load and rebuilt afterwards. The functions are not `STRICT`,
 because PostgreSQL does not inline a strict SQL function whose body contains `CASE` and would
 call it through the SQL-function executor for every row (`EXPLAIN VERBOSE` shows the call).
-How long the load takes at the target size is part of the measured run.
+At SCALE=10000000 the load, including the rebuild of keys and indexes, took 38 minutes in the
+measured run, while another project's containers were busy for part of it
+(docs/benchmarking.md).
 
 **Consequences.** The data never leaves the server and there is no Python dependency for loading.
 The same SCALE and anchor give the same rows. Names, companies and brands are fictional and all
@@ -62,7 +64,8 @@ e-mail domains are reserved example domains.
 
 ## 5. Rank the workload by buffers, publish timings only from measured runs
 
-**Context.** This machine is shared with other builds; durations measured here would mislead.
+**Context.** The lab was built on a laptop shared with other builds, where durations would
+mislead; a measured run needs the machine to itself.
 
 **Decision.** The workload is ranked by shared buffers touched (`EXPLAIN (ANALYZE, BUFFERS)`),
 which depends on the data and the plan rather than on load (a parallel plan's count varies a
@@ -72,11 +75,12 @@ planning plus execution time, with the result rows serialised to text
 (`EXPLAIN (ANALYZE, SERIALIZE TEXT, TIMING OFF, SUMMARY ON)`), for a quiet machine, and ranks the
 workload by that time instead.
 
-**Consequences.** Reports can be generated anywhere and compared. Every timing column in the
-committed reports says "pending a measured run" (docs/benchmarking.md). Buffers are a proxy:
-the casebook holds the statements that read the most pages, which is not the same as the
-slowest (a sequential scan testing six `ILIKE` patterns per row, as the RFQ search does, spends
-its time on CPU). The measured run re-ranks by time, and statements that rise get cases
+**Consequences.** Reports can be generated anywhere and compared. The committed reports come
+from one measured run at SCALE=10000000 (docs/benchmarking.md); functional runs, CI's included,
+leave every timing column "pending a measured run". Buffers are a proxy: the casebook held the
+statements that read the most pages, which is not the same as the slowest. The measured run
+re-ranked the workload by time: the RFQ search, a sequential scan testing six `ILIKE` patterns
+per row, entered the top ten and became case 11, and cases 8 to 10 fell out of it and stay
 (docs/benchmarking.md, "When the time ranking differs").
 
 ## 6. The casebook is data, and CI checks plan shape
@@ -92,7 +96,10 @@ TopFlow's list endpoints run the page and a count with the same filter, and fixi
 the other leaves the endpoint as slow as before.
 
 **Consequences.** A regression that changes a plan fails CI at SCALE=100000; the same checks pass
-at SCALE=1000000. Checks cannot prove a fix is fast enough, which is what the measured run is for.
+at SCALE=10000000 in the committed reports. An expectation must hold at both scales, so it names
+only what the fix guarantees: case 11 checks its own trigram index, not the organisation-name
+index, which the planner uses at SCALE=10000000 (5,000 organisations) but not at SCALE=100000
+(50). Checks cannot prove a fix is fast enough, which is what the measured run is for.
 
 ## 7. A covering B-tree on `orders.createdAt`, not BRIN or a materialised view
 
@@ -152,20 +159,20 @@ the permissive policy calls `app.is_tenant_row(organisation, owner)`, a PL/pgSQL
 own pool.
 
 **Alternatives.** The membership lookup inside the permissive policy (the first version) made the
-planner expect 26 of 9,943 rows and read every order of the organisation for one page. A
-transparent policy with inlined settings kept the index, but the planner applied the
-organisation's share twice and expected 264 rows; the bitmap plan cost under 10% more than the
-index scan.
+planner expect 32 of 39,688 rows at SCALE=10000000 and read every order of the organisation for
+one page. A transparent policy with inlined settings applied the organisation's share twice and
+expected 401 rows; it kept the index at CI scale but lost it at SCALE=10000000, where its page
+took 70 ms against 0.13 ms (`reports/rls-plans.md`).
 
 **Consequences.** A user who claims an organisation they do not belong to sees nothing. The
 function gets a fixed default selectivity, so the estimate is a sixth of the real rows for every
-organisation: wrong, but predictably so, and the bitmap plan costs 76 times the index scan
-(`reports/rls-plans.md`). The price is paid by a query that forgets its tenant filter: the
-function can never be an index condition, so such a query calls it for every row it reads (all
-200,000 orders at SCALE=1000000 to count one tenant's 9,943). The CPU this costs is measured
-only by `./lab rls-plans --measure`, which waits for the reference run; `topflow_app`'s 30 s
-statement timeout bounds a single query. Registering a trade account, accepting an invitation
-and KYC cross tenants and belong to the staff role in this model.
+organisation: wrong, but predictably so, and the bitmap plan costs about 300 times the index
+scan at SCALE=10000000 (`reports/rls-plans.md`). The price is paid by a query that forgets its
+tenant filter: the function can never be an index condition, so such a query calls it for every
+row it reads. At SCALE=10000000, counting one tenant's 39,688 orders that way read all two million
+and took 371 ms, against 50 to 55 ms under the designs that read only the tenant's rows;
+`topflow_app`'s 30 s statement timeout bounds a single query. Registering a trade account,
+accepting an invitation and KYC cross tenants and belong to the staff role in this model.
 
 The context is self-asserted: any `topflow_app` session can set `app.user_id` and `app.org_id`.
 The policies therefore protect against API queries that forget their tenant filter, not against
@@ -238,8 +245,8 @@ tested.
 **Decision.** One dependency at run time (psycopg 3.3 with its binary wheel), locked with uv.
 Development tools: pytest, mypy in strict mode, ruff, sqlfluff.
 
-**Consequences.** Unit tests run without a database from plans recorded at SCALE=1000000;
-integration tests and pgTAP suites run against the lab.
+**Consequences.** Unit tests run without a database from plans recorded at SCALE=1000000 (and,
+for case 11, at SCALE=10000000); integration tests and pgTAP suites run against the lab.
 
 ## 16. Customer writes: column privileges, state policies, a definer function for numbers
 

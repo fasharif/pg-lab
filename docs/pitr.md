@@ -67,9 +67,21 @@ the archived WAL with `pg_waldump`, then restore with `--type=xid --target-exclu
 stops just before its commit and keeps the writes that committed while the `DELETE` ran. The
 drill does not script that yet (README, roadmap).
 
-Both committed reports come from one regeneration run at SCALE=1000000 (2026-09-27): each
-drill deleted and restored 1,001,547 order lines with an identical checksum and lost none of the
-acknowledged writes made before its target.
+Both committed reports come from the measured run at SCALE=10000000 on 2026-10-02
+(docs/benchmarking.md). Each drill deleted and restored 10,000,837 order lines with an identical
+checksum and lost none of the acknowledged writes made before its target (122 and 120 of them).
+
+| | Recorded time | Restore point |
+| --- | ---: | ---: |
+| Recovery time (RTO), from a full backup taken minutes before | 53.7 s | 63.9 s |
+| Writes made after the target and discarded by the in-place restore | 222 | 222 |
+| Last of them, after the target | 36.8 s | 67.7 s |
+| Recovery stopped after the last write it kept | 0.03 s | 0.07 s |
+
+The discarded writes are the ones the client made while the drill deleted the order lines and
+archived the accident's WAL; in a real incident the loss window is however long the application
+keeps writing before the restore. Both recoveries kept every write up to less than one client
+interval (0.1 s) before their target. Each value comes from one run of the drill.
 
 ## RTO and data loss
 

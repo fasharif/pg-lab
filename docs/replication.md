@@ -5,8 +5,8 @@ Files: `docker/postgres/lab-entrypoint.sh` (clone on first start), `scripts/dril
 `src/pglab/drills.py` (analysis). Reports: `reports/switchover-drill-pg1-to-pg2.md` and
 `reports/switchover-drill-pg2-to-pg1.md` (one per direction), `reports/failover-drill.md`.
 
-The committed reports come from one regeneration run at SCALE=1000000 (2026-09-27): a
-switchover from pg1 to pg2, one back, then the failover drill.
+The committed reports come from the measured run at SCALE=10000000 on 2026-10-02
+(docs/benchmarking.md): a switchover from pg1 to pg2, one back, then the failover drill.
 
 ## The standby
 
@@ -89,7 +89,7 @@ never sees and pg_rewind has real work to do.
 | 4 | The old primary is started again without fencing: it runs crash recovery and comes up as a second primary on its old timeline |
 | 5 | It commits a transaction of 500 rows that the new primary never receives; the new primary takes one write of its own |
 | 6 | Stop the old primary (the fencing that should have come before step 3) |
-| 7 | `pg_rewind` the old primary against the new one, connected as `rewind` |
+| 7 | `pg_rewind` the old primary against the new one, connected as `rewind`, with `--restore-target-wal` |
 | 8 | Restart it as a standby of the new primary (the same steps as the switchover); check and write the report |
 
 The checks:
@@ -108,6 +108,13 @@ The checks:
 - the old primary streams from the new one again, has the new primary's write and none of the
   500 rows.
 
+A lesson from building the drill: after the crash, the restart and the clean shutdown, the old
+primary had already recycled the WAL segment that held the point where the timelines diverged
+(no checkpoint or replication slot needed it any more), and pg_rewind stopped with `could not
+open file ... pg_wal/...`. It now runs with `--restore-target-wal` and the node's configuration
+file, so it fetches such segments from the pgBackRest archive with the node's `restore_command`;
+in the measured run it fetched one, `0000000500000007000000DC`.
+
 The report also counts the writes the crashed primary had acknowledged but the new one does not
 have. Replication is asynchronous: a commit is acknowledged once the primary's own WAL is
 flushed, so whatever it had not yet sent when it died is lost in the failover. On a quiet lab
@@ -124,11 +131,38 @@ Patroni do the fencing with a lock held in a consensus store; the lab has none (
 ## Measured values
 
 With `--measure`, the switchover and failover reports show the write downtime seen by the client
-(the longest gap between two acknowledged writes) and how long the script took: from stopping the
-old primary to the promotion in a switchover, from killing it to the promotion in a failover.
-Functional runs leave them pending (docs/benchmarking.md). The failover drill promotes the
-standby as soon as the primary is dead; a real failover first has to notice the failure (a
-health check's timeout, or an operator), and that delay comes on top of the measured downtime.
+(the longest time from one acknowledged write to the next), how long the database side took
+(from stopping the old primary to the promotion in a switchover; from the kill to the end of the
+promotion in a failover, and the promotion alone) and how long the client's first write on the
+new primary took from sending to acknowledgement. Functional runs leave them pending
+(docs/benchmarking.md). The failover drill promotes the standby as soon as the primary is dead;
+a real failover first has to notice the failure (a health check's timeout, or an operator), and
+that delay comes on top of the measured downtime.
+
+At SCALE=10000000 (one run of each, 2026-10-02):
+
+| Drill | Write downtime seen by the client | Database side | Client's first write on the new primary | Acknowledged writes lost |
+| --- | ---: | ---: | ---: | ---: |
+| Switchover, pg1 to pg2 | 4.42 s | 2.63 s | 4.02 s | 0 of 85 |
+| Switchover, pg2 to pg1 | 6.32 s | 2.38 s | 4.01 s | 0 of 65 |
+| Failover, pg1 killed | 4.31 s | 0.97 s (promotion 0.10 s) | 4.01 s | 0 of the 36 that pg1 acknowledged |
+
+The client, not the database, sets most of the downtime. In every drill the write that finally
+succeeded on the new primary had waited about 4 s. libpq tries the hosts in order, so each new
+connection first looks up the name of the node that is down, and Docker's DNS takes seconds to
+answer for a container that is stopped or gone. A probe after the run, with pg1 removed, measured
+this from the runner:
+
+| Probe (in the runner) | Time |
+| --- | ---: |
+| `getent ahosts pg1` (no such container; IPv4 and IPv6 lookups) | 8.01 s, not found |
+| `getent ahosts pg2` | 0.003 s |
+| `psql "host=pg1,pg2 ... target_session_attrs=read-write connect_timeout=2"`, five connections | 4.02 to 4.04 s each |
+| `psql "host=pg2 ..."`, three connections | 0.034 to 0.036 s each |
+
+In the switchover from pg2 to pg1 one attempt also ran out of the client's 2 s `connect_timeout`
+first, hence its longer gap. Addresses that fail fast (a proxy, a virtual IP, or libpq's
+`hostaddr`) would leave mainly the database side, 1 to 2.6 s here; that was not measured.
 
 ## Clients that are not libpq
 

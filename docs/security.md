@@ -176,60 +176,62 @@ organisation's order page keeps casebook case 8's index.
 `./lab rls-plans` plans the page and its total as the owner and as `topflow_app` under three
 policy designs, and once more with case 8's index built without `INCLUDE ("userId")`. The
 alternatives are applied in a transaction that is rolled back. From `reports/rls-plans.md`
-(SCALE=1000000, the largest organisation, 9,943 orders):
+(`./lab rls-plans --measure` at SCALE=10000000, the largest organisation, 39,688 orders; times
+are medians of 15 runs):
 
-| Planned as | Estimated rows | Page | Cost without index scans | Total |
-| --- | ---: | --- | ---: | --- |
-| owner, no RLS | 9,907 | index scan, 18 buffers | 459x | index-only scan, 13 buffers |
-| lab policies | 1,651 | index scan, 21 buffers | 76x | index-only scan, 143 buffers |
-| lab policies, index without `userId` | 1,651 | index scan, 21 buffers | 77x | bitmap heap scan, 6,764 buffers |
-| transparent policy | 264 | index scan, 21 buffers | 1.1x | index-only scan, 143 buffers |
-| lookup inside the policy | 26 | bitmap heap scan and sort, 6,899 buffers | 1.0x | bitmap heap scan, 6,899 buffers |
+| Planned as | Estimated rows | Page | Page time | Cost without index scans | Total | Total time |
+| --- | ---: | --- | ---: | ---: | --- | ---: |
+| owner, no RLS | 38,594 | index scan, 22 buffers | 0.088 ms | 1,818x | index-only scan, 52 buffers | 1.9 ms |
+| lab policies | 6,432 | index scan, 26 buffers | 0.126 ms | 303x | index-only scan, 558 buffers | 19.4 ms |
+| lab policies, index without `userId` | 6,433 | index scan, 26 buffers | 0.147 ms | 305x | bitmap heap scan, 34,029 buffers | 65.2 ms |
+| transparent policy | 401 | bitmap heap scan and sort, 34,041 buffers | 69.6 ms | 1.0x | bitmap heap scan, 34,041 buffers | 56.2 ms |
+| lookup inside the policy | 32 | bitmap heap scan and sort, 34,045 buffers | 70.2 ms | 1.0x | bitmap heap scan, 34,045 buffers | 51.1 ms |
 
 Estimates come from `ANALYZE`'s random sample, so they move by a few per cent from one run to the
-next on the same data (the lab policies' factor was between 74.8 and 76.3 in the three runs at
-this scale made for this page); the differences between the designs do not.
+next on the same data: the run made for this table gave 6,432 rows and a factor of 302.6 for the
+lab policies, an earlier run of the same command in the same measured session 6,345 and 298.7.
+The differences between the designs do not move.
 
 *Cost without index scans* is the planner's cost for the best page plan it finds with index
 scans disabled, as a multiple of the chosen plan's cost: how far the page is from losing its
-index. What each design does to the estimate:
+index (1.0 means it has already lost it). What each design does to the estimate:
 
 - **Membership lookup inside the policy**, `"organizationId" = (SELECT member_org())`, the
   usual first design and the lab's first version. The planner cannot know the subquery's value
-  when it plans, so it assumes the average organisation's share of the orders and expects 26
+  when it plans, so it assumes the average organisation's share of the orders and expects 32
   rows. Fetching that few rows with a bitmap scan and sorting them looks cheapest; the page reads
-  all 9,943 orders (6,899 buffers) to return 20.
+  all 39,688 orders (34,045 buffers) to return 20 and takes 70 ms instead of 0.13 ms.
 - **Transparent policy**, `"organizationId" = app.org_id() OR ...`, where `app.org_id()` is an
   SQL function that PostgreSQL inlines. The planner evaluates `current_setting()` while
   planning, so it knows the organisation, but it applies the organisation's share twice, once
   for the query's predicate and once for the policy's, as if they were independent. The largest
-  organisation has 5% of the orders, so the estimate falls to 5% of the real count, and to half
-  of that for the membership gate: 264 rows. The smaller the organisation, the smaller the
-  fraction. The page keeps its index in this run, but only just: the bitmap plan costs 652
-  against 601 for the index scan, so a different statistics sample or a little more data can
-  tip it.
+  organisation has 2% of the orders, so the estimate falls to 2% of the real count, and to half
+  of that for the membership gate: 401 rows of 39,688. In the rehearsal at SCALE=100000 the page
+  still kept its index, by a factor of 2.2; at SCALE=10000000 it does not, and the page plan is
+  the same bitmap scan and sort as the lookup's.
 - **Tenant-row function**, the lab's design. PL/pgSQL functions are never inlined, so the
   planner uses its default selectivity for a boolean function, one third, and one half for the
   membership gate: it expects one sixth of the real rows whichever the organisation, and the
-  bitmap plan costs 76 times the index scan. The function is declared `COST 10`: with the
+  bitmap plan costs about 300 times the index scan. The function is declared `COST 10`: with the
   default cost of 100 for non-C functions, the planner ran the organisation's count as a
   parallel index-only scan to share out the function calls.
 
 The total needs one more change. Under RLS the count evaluates the policy for every row, and the
 policy reads `userId` as well as `organizationId`. With `(organizationId, createdAt)` alone the
-count visits all the organisation's orders in the heap (6,764 buffers); with `userId` in the
-index it stays an index-only scan (143). The owner needs 13 buffers because it counts on the
-smaller `(organizationId, status)` index, whose repeated keys B-tree deduplication compresses.
-The price is index size: `docs/indexing.md` gives the index's size with and without `userId`.
+count visits all the organisation's orders in the heap (34,029 buffers, 65 ms); with `userId` in
+the index it stays an index-only scan (558 buffers, 19 ms). The owner needs 52 buffers because it
+counts on the smaller `(organizationId, status)` index, whose repeated keys B-tree deduplication
+compresses, and it calls no function per row. The price is index size: `docs/indexing.md` gives
+the index's size with and without `userId`.
 
 Estimates are the fragile part of this design, not correctness: every design returns the same
 rows. The integration tests (`tests/integration/test_rls_plans.py`) run as `topflow_app` and
 fail if the page loses its index or has a sort, if the index scan's cost margin falls below a
 factor of 10, if the total stops being an index-only scan, or if the page differs from the
 owner's. A separate test checks the design itself: the orders policy calls the PL/pgSQL
-`app.is_tenant_row`. The threshold of 10 separates the designs at CI scale too: at
-SCALE=100000, `./lab rls-plans` gave 18.7 and 18.8 in two runs for the lab's policies and 2.2
-for the transparent policy.
+`app.is_tenant_row`. The threshold of 10 separates the designs at CI scale too: in the rehearsal
+at SCALE=100000 before the measured run, `./lab rls-plans` gave 18.8 for the lab's policies and
+2.2 for the transparent policy.
 
 ### The price: a query that forgets its tenant filter
 
@@ -237,26 +239,25 @@ The opaque function has a cost that the estimates do not show. PostgreSQL cannot
 `app.is_tenant_row(...)` into an index condition, so a query that forgets its tenant filter,
 the very case row-level security is there for, calls the function for every row it reads.
 `./lab rls-plans` also runs `SELECT count(*) FROM orders`, with no `WHERE` clause, under each
-design (SCALE=1000000, same report):
+design (SCALE=10000000, same report):
 
-| Planned as | Orders read | Orders counted | Buffers |
-| --- | ---: | ---: | ---: |
-| lab policies | 199,999 | 9,943 | 2,670 |
-| transparent policy | 199,999 | 9,943 | 2,400 |
-| lookup inside the policy | 9,943 | 9,943 | 6,843 |
+| Planned as | Orders read | Orders counted | Buffers | Median time |
+| --- | ---: | ---: | ---: | ---: |
+| owner, no RLS | 2,000,000 | 2,000,000 | 1,719 | 42.2 ms |
+| lab policies | 1,999,999 | 39,688 | 54,376 | 371 ms |
+| lab policies, index without `userId` | 1,999,999 | 39,688 | 108,022 | 713 ms |
+| transparent policy | 39,688 | 39,688 | 34,042 | 55.4 ms |
+| lookup inside the policy | 39,688 | 39,688 | 34,046 | 50.8 ms |
 
-(The table has 200,000 orders; the parallel scans report per-worker averages, which round to
-199,999.) Every design returns the tenant's 9,943 orders and nothing else. The lab's design
-reads all 200,000 and calls its PL/pgSQL function once for each, about two million calls at the
-10M target. The transparent policy reads the same rows here, because the planner prefers one
-index-only scan with a filter to combining two index conditions, but its test is inline SQL, not
-a function call. Only the membership lookup reads just the tenant's rows, because its
-subquery's value is known when the scan starts, and that is what made the planner misjudge the
-page. So the lab trades CPU on forgotten filters for stable plans on the queries the API
-actually sends. How much CPU is the one number still missing: `./lab rls-plans --measure` times
-all three statements under each design, and it is part of the reference measurement
-(docs/benchmarking.md). `topflow_app`'s `statement_timeout` of 30 s bounds the damage of any one
-such query.
+(The table has 2,000,000 orders; the parallel scans report per-process averages, which round to
+1,999,999.) Every design under RLS counts the tenant's 39,688 orders and nothing else. The lab's
+design reads all two million and calls its PL/pgSQL function once for each: 371 ms, against
+50 to 55 ms for the two designs that read only the tenant's rows, and 713 ms when the index
+lacks `userId` and the scan becomes sequential. The transparent policy and the lookup read just
+the tenant's rows because the organisation is known when the scan starts, which is exactly what
+made the planner misjudge the page. So the lab trades CPU on forgotten filters (about a third of
+a second per such count at this size) for stable plans on the queries the API actually sends.
+`topflow_app`'s `statement_timeout` of 30 s bounds the damage of any one such query.
 
 ## Limitations
 
