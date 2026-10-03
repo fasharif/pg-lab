@@ -2,7 +2,7 @@
 # PostgreSQL 18 client tools (psql, pgbench) and pg_prove for the pgTAP suites.
 # The repository is bind-mounted at /work, so code changes need no rebuild.
 FROM postgres:18.6-trixie AS pgdg
-FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.22 AS uv
 
 FROM python:3.14.7-slim-trixie
 
